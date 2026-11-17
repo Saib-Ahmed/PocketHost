@@ -10,6 +10,21 @@ buildscript {
     }
 }
 
+// Ensure autolinking.json is always present in root build directory for ReactPlugin
+def autolinkingDir = file("${buildDir}/generated/autolinking")
+if (!autolinkingDir.exists()) {
+    autolinkingDir.mkdirs()
+}
+def autolinkingFile = file("${autolinkingDir}/autolinking.json")
+if (!autolinkingFile.exists()) {
+    def sourceConfig = file("autolinking.json")
+    if (sourceConfig.exists()) {
+        autolinkingFile.text = sourceConfig.text
+    } else {
+        autolinkingFile.text = '{"reactNativeVersion":"0.88.1","dependencies":{},"project":{"android":{"packageName":"com.pockethost"}}}'
+    }
+}
+
 ext {
     buildToolsVersion = "35.0.0"
     minSdkVersion = 26

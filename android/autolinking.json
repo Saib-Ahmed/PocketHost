@@ -1,0 +1,13 @@
+{
+  "reactNativeVersion": "0.88.1",
+  "dependencies": {},
+  "project": {
+    "android": {
+      "sourceDir": "android",
+      "appName": "app",
+      "packageName": "com.pockethost",
+      "applicationId": "com.pockethost",
+      "mainActivity": ".MainActivity"
+    }
+  }
+}
