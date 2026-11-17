@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "PocketHost",
+    "slug": "pockethost",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B0F19",
+    "android": {
+      "package": "com.pockethost",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0F19"
+      }
+    }
+  }
+}
