@@ -1,7 +1,4 @@
 apply plugin: "com.android.application"
-if (project.extensions.findByName("kotlin") == null) {
-    apply plugin: "org.jetbrains.kotlin.android"
-}
 apply plugin: "com.facebook.react"
 
 android {
@@ -42,9 +39,15 @@ android {
         }
     }
 
-    packagingOptions {
-        pickFirst "**/libc++_shared.so"
-        pickFirst "**/libfbjni.so"
+    buildFeatures {
+        buildConfig = true
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts.add("**/libc++_shared.so")
+            pickFirsts.add("**/libfbjni.so")
+        }
     }
 }
 
