@@ -23,5 +23,12 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "expo": {
+    "install": {
+      "exclude": [
+        "typescript"
+      ]
+    }
   }
 }
