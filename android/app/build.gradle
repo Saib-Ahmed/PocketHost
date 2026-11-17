@@ -1,17 +1,19 @@
 apply plugin: "com.android.application"
-apply plugin: "org.jetbrains.kotlin.android"
+if (project.extensions.findByName("kotlin") == null) {
+    apply plugin: "org.jetbrains.kotlin.android"
+}
 apply plugin: "com.facebook.react"
 
 android {
-    ndkVersion rootProject.ext.ndkVersion
-    buildToolsVersion rootProject.ext.buildToolsVersion
-    compileSdk rootProject.ext.compileSdkVersion
+    ndkVersion rootProject.ext.has('ndkVersion') ? rootProject.ext.ndkVersion : "26.1.10909125"
+    buildToolsVersion rootProject.ext.has('buildToolsVersion') ? rootProject.ext.buildToolsVersion : "35.0.0"
+    compileSdk 35
 
     namespace "com.pockethost"
     defaultConfig {
         applicationId "com.pockethost"
-        minSdkVersion rootProject.ext.minSdkVersion
-        targetSdkVersion rootProject.ext.targetSdkVersion
+        minSdkVersion 26
+        targetSdkVersion 35
         versionCode 1
         versionName "1.0"
 
