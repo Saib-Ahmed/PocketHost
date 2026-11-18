@@ -48,6 +48,10 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        noCompress 'gz', 'tar'
+    }
+
     packaging {
         jniLibs {
             useLegacyPackaging = true

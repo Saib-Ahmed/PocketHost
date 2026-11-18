@@ -79,12 +79,29 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
             getProjectsDir().mkdirs()
 
             try {
-                reactContext.assets.open("alpine-rootfs.tar.gz").use { input ->
-                    val tempTar = File(reactContext.cacheDir, "alpine-rootfs.tar.gz")
-                    FileOutputStream(tempTar).use { out -> input.copyTo(out) }
-                    extractTarGz(tempTar, rootDir)
-                    tempTar.delete()
+                val assetList = reactContext.assets.list("")?.toList() ?: emptyList()
+                val assetName = when {
+                    assetList.contains("alpine-rootfs.tar") -> "alpine-rootfs.tar"
+                    assetList.contains("alpine-rootfs.tar.gz") -> "alpine-rootfs.tar.gz"
+                    else -> "alpine-rootfs.tar"
                 }
+
+                val tempTar = File(reactContext.cacheDir, "alpine-rootfs.archive")
+                reactContext.assets.open(assetName).use { input ->
+                    FileOutputStream(tempTar).use { out -> input.copyTo(out) }
+                }
+
+                val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
+                val busybox = File(nativeLibDir, "libbusybox.so")
+                if (busybox.exists()) {
+                    val pb = ProcessBuilder(busybox.absolutePath, "tar", "-xf", tempTar.absolutePath, "-C", rootDir.absolutePath)
+                    pb.redirectErrorStream(true)
+                    val p = pb.start()
+                    p.waitFor()
+                } else {
+                    extractTarGz(tempTar, rootDir)
+                }
+                tempTar.delete()
             } catch (e: Exception) {
                 android.util.Log.e("PocketHost", "Failed to extract alpine rootfs", e)
             }
