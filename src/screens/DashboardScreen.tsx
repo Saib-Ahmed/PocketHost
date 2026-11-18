@@ -102,8 +102,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     }
   };
 
-  const handleQuickCreate = (stackId: TechStackId) => {
-    const newProj = createProject(stackId);
+  const handleQuickCreate = async (stackId: TechStackId) => {
+    const newProj = await createProject(stackId);
     setActiveProjectId(newProj.id);
     onOpenConfig(newProj.id);
   };
@@ -144,32 +144,42 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         </Text>
       </View>
 
-      {projects.map((project) => {
-        const stack = SUPPORTED_STACKS.find((s) => s.id === project.stackId) || SUPPORTED_STACKS[0];
-        const isRunning = project.status === 'RUNNING';
-        const isBuilding = project.status === 'BUILDING';
+      {projects.length === 0 ? (
+        <Card style={styles.emptyProjectsCard}>
+          <Text style={styles.emptyProjectsTitle}>No Hosted Services Yet</Text>
+          <Text style={styles.emptyProjectsSubtitle}>
+            PocketHost runs local servers directly on your Android phone. Tap a starter template below or create a project to deploy your first real service.
+          </Text>
+          <TouchableOpacity
+            style={styles.emptyCreateBtn}
+            onPress={() => onOpenStacks()}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.emptyCreateBtnText}>+ Deploy First Project</Text>
+          </TouchableOpacity>
+        </Card>
+      ) : (
+        projects.map((project) => {
+          const stack = SUPPORTED_STACKS.find((s) => s.id === project.stackId) || SUPPORTED_STACKS[0];
+          const isRunning = project.status === 'RUNNING';
+          const isBuilding = project.status === 'BUILDING';
 
-        return (
-          <Card key={project.id} style={styles.projectCard}>
-            <View style={styles.projectTopRow}>
-              <View style={styles.projectIdentity}>
-                <View style={[styles.projectStackIconBox, { backgroundColor: `${stack.badgeColor}25` }]}>
-                  <Text style={styles.projectStackIcon}>{stack.icon}</Text>
-                </View>
-                <View style={styles.projectTextWrap}>
-                  <View style={styles.projectNameRow}>
-                    <Text style={styles.projectName} numberOfLines={1}>{project.name}</Text>
-                    {project.isDemo && (
-                      <View style={styles.demoBadge}>
-                        <Text style={styles.demoBadgeText}>DEMO</Text>
-                      </View>
-                    )}
+          return (
+            <Card key={project.id} style={styles.projectCard}>
+              <View style={styles.projectTopRow}>
+                <View style={styles.projectIdentity}>
+                  <View style={[styles.projectStackIconBox, { backgroundColor: `${stack.badgeColor}25` }]}>
+                    <Text style={styles.projectStackIcon}>{stack.icon}</Text>
                   </View>
-                  <Text style={styles.projectMetaText}>
-                    {stack.name} • Port {project.port} {isRunning ? `• ${formatUptime(project.uptimeSeconds)}` : ''}
-                  </Text>
+                  <View style={styles.projectTextWrap}>
+                    <View style={styles.projectNameRow}>
+                      <Text style={styles.projectName} numberOfLines={1}>{project.name}</Text>
+                    </View>
+                    <Text style={styles.projectMetaText}>
+                      {stack.name} • Port {project.port} {isRunning ? `• ${formatUptime(project.uptimeSeconds)}` : ''}
+                    </Text>
+                  </View>
                 </View>
-              </View>
 
               <Badge
                 label={project.status}
@@ -278,7 +288,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             </View>
           </Card>
         );
-      })}
+      }))}
 
       {/* 3. Quick Frameworks & Tech Stacks (2-Column Grid Layout) */}
       <View style={[styles.sectionHeader, { marginTop: 10 }]}>
@@ -782,6 +792,42 @@ const styles = StyleSheet.create({
   },
   logStderr: {
     color: colors.error,
+  },
+  emptyProjectsCard: {
+    padding: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: 6,
+    backgroundColor: 'rgba(30, 41, 59, 0.5)',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.15)',
+    borderStyle: 'dashed',
+    borderRadius: 14,
+  },
+  emptyProjectsTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  emptyProjectsSubtitle: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  emptyCreateBtn: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  emptyCreateBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#ffffff',
   },
   logSystem: {
     color: colors.textMuted,

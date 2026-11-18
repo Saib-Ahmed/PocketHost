@@ -44,8 +44,8 @@ export const StackSelectionScreen: React.FC<StackSelectionScreenProps> = ({
 
   const stackProjects = projects.filter((p) => p.stackId === selectedStackId);
 
-  const handleCreateNew = () => {
-    const newProj = createProject(selectedStackId);
+  const handleCreateNew = async () => {
+    const newProj = await createProject(selectedStackId);
     setActiveProjectId(newProj.id);
     if (onOpenConfig) {
       onOpenConfig(newProj.id);

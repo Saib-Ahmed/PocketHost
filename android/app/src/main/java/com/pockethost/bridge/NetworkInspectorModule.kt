@@ -1,16 +1,21 @@
 package com.pockethost.bridge
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
+import android.os.StatFs
 import android.provider.Settings
 import com.facebook.react.bridge.*
 import com.pockethost.service.HostingForegroundService
+import java.io.File
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
@@ -112,6 +117,78 @@ class NetworkInspectorModule(private val reactContext: ReactApplicationContext) 
             }
         } else {
             promise.resolve(true)
+        }
+    }
+
+    @ReactMethod
+    fun getSystemMetrics(promise: Promise) {
+        try {
+            // 1. RAM Telemetry from ActivityManager
+            val actManager = reactContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val memInfo = ActivityManager.MemoryInfo()
+            actManager.getMemoryInfo(memInfo)
+
+            val totalRamMb = (memInfo.totalMem.toDouble() / (1024.0 * 1024.0))
+            val availRamMb = (memInfo.availMem.toDouble() / (1024.0 * 1024.0))
+            val usedRamMb = (totalRamMb - availRamMb).coerceAtLeast(0.0)
+            val ramUsagePercent = if (totalRamMb > 0) ((usedRamMb / totalRamMb) * 100.0) else 0.0
+
+            // 2. Storage Telemetry from StatFs
+            val statFs = StatFs(reactContext.filesDir.path)
+            val blockSize = statFs.blockSizeLong
+            val totalBlocks = statFs.blockCountLong
+            val availBlocks = statFs.availableBlocksLong
+
+            val totalStorageMb = ((totalBlocks * blockSize).toDouble() / (1024.0 * 1024.0))
+            val availStorageMb = ((availBlocks * blockSize).toDouble() / (1024.0 * 1024.0))
+            val usedStorageMb = (totalStorageMb - availStorageMb).coerceAtLeast(0.0)
+
+            // 3. Real PocketHost Storage Footprint (binaries, projects, rootfs)
+            fun calculateDirSize(dir: File): Long {
+                var size = 0L
+                val files = dir.listFiles() ?: return 0L
+                for (f in files) {
+                    size += if (f.isDirectory) calculateDirSize(f) else f.length()
+                }
+                return size
+            }
+            val appDataBytes = calculateDirSize(reactContext.filesDir)
+            val appDataSizeMb = appDataBytes.toDouble() / (1024.0 * 1024.0)
+
+            // 4. Hardware CPU Cores
+            val cpuCores = Runtime.getRuntime().availableProcessors()
+
+            // 5. Battery Telemetry
+            val batteryStatus: Intent? = IntentFilter(Intent.ACTION_BATTERY_CHANGED).let { filter ->
+                reactContext.registerReceiver(null, filter)
+            }
+            val batteryLevel: Int = batteryStatus?.let { intent ->
+                val level: Int = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale: Int = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                if (level >= 0 && scale > 0) (level * 100 / scale) else -1
+            } ?: -1
+
+            val status: Int = batteryStatus?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+            val isCharging: Boolean = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                    status == BatteryManager.BATTERY_STATUS_FULL
+
+            val map = Arguments.createMap().apply {
+                putDouble("totalRamMb", totalRamMb)
+                putDouble("usedRamMb", usedRamMb)
+                putDouble("availRamMb", availRamMb)
+                putDouble("ramUsagePercent", ramUsagePercent)
+                putDouble("totalStorageMb", totalStorageMb)
+                putDouble("usedStorageMb", usedStorageMb)
+                putDouble("availStorageMb", availStorageMb)
+                putDouble("appDataSizeMb", appDataSizeMb)
+                putInt("cpuCores", cpuCores)
+                putInt("batteryLevel", batteryLevel)
+                putBoolean("isCharging", isCharging)
+                putBoolean("isLowMemory", memInfo.lowMemory)
+            }
+            promise.resolve(map)
+        } catch (e: Exception) {
+            promise.reject("METRICS_ERROR", e.message, e)
         }
     }
 }

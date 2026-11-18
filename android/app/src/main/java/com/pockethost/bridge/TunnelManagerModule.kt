@@ -61,44 +61,20 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 val binaryName = if (tunnelKey == "zrok") "zrok" else "cloudflared"
                 val binaryFile = File(binDir, binaryName)
 
-                val command = mutableListOf<String>()
-                if (binaryFile.exists() && binaryFile.canExecute()) {
-                    if (tunnelKey == "zrok") {
-                        command.addAll(listOf(binaryFile.absolutePath, "share", "public", "http://127.0.0.1:$port"))
-                    } else {
-                        command.addAll(listOf(binaryFile.absolutePath, "tunnel", "--url", "http://127.0.0.1:$port", "--no-autoupdate"))
-                    }
-                } else {
-                    // Simulated / Mock Tunnel fallback if binary not yet downloaded
-                    val mockSubdomain = "pocket-" + (1000..9999).random()
-                    val simulatedUrl = if (tunnelKey == "zrok") {
-                        "https://$mockSubdomain.share.zrok.io"
-                    } else {
-                        "https://$mockSubdomain.trycloudflare.com"
-                    }
-
-                    val instance = TunnelInstance(
-                        provider = tunnelKey,
-                        port = port,
-                        publicUrl = simulatedUrl,
-                        status = "CONNECTED"
-                    )
-                    activeTunnels[tunnelKey] = instance
-
-                    delay(1200) // Realistic connection handshake simulation
-                    emitTunnelUrl(tunnelKey, simulatedUrl, port)
-                    emitTunnelStatus(tunnelKey, "CONNECTED", simulatedUrl)
-
+                if (!binaryFile.exists() || !binaryFile.canExecute()) {
+                    val errorMsg = "${binaryName.capitalize()} binary is not installed on this device. Please install it from the Packages tab first."
+                    emitTunnelStatus(tunnelKey, "ERROR", null)
                     withContext(Dispatchers.Main) {
-                        val map = Arguments.createMap().apply {
-                            putString("provider", tunnelKey)
-                            putInt("port", port)
-                            putString("url", simulatedUrl)
-                            putString("status", "CONNECTED")
-                        }
-                        promise.resolve(map)
+                        promise.reject("BINARY_MISSING", errorMsg)
                     }
                     return@launch
+                }
+
+                val command = mutableListOf<String>()
+                if (tunnelKey == "zrok") {
+                    command.addAll(listOf(binaryFile.absolutePath, "share", "public", "http://127.0.0.1:$port"))
+                } else {
+                    command.addAll(listOf(binaryFile.absolutePath, "tunnel", "--url", "http://127.0.0.1:$port", "--no-autoupdate"))
                 }
 
                 val processBuilder = ProcessBuilder(command)

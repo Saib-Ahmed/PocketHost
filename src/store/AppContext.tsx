@@ -14,9 +14,10 @@ import {
 import { SoftwareItem } from '../types/software';
 import { LogLine, BootstrapProgressEvent } from '../types/process';
 import { NativeProcessManager } from '../native/NativeProcessManager';
-import { NativePRootBootstrap } from '../native/NativePRootBootstrap';
+import { NativePRootBootstrap, PackageProgressEvent } from '../native/NativePRootBootstrap';
 import { NativeTunnelManager } from '../native/NativeTunnelManager';
 import { NativeNetworkInspector } from '../native/NativeNetworkInspector';
+import { getStarterFiles } from '../utils/starterTemplates';
 
 interface AppContextType {
   isBootstrapReady: boolean;
@@ -31,12 +32,15 @@ interface AppContextType {
   startProject: (id: string) => Promise<void>;
   stopProject: (id: string) => Promise<void>;
   restartProject: (id: string) => Promise<void>;
-  createProject: (stackId: TechStackId, name?: string) => ProjectItem;
+  createProject: (stackId: TechStackId, name?: string) => Promise<ProjectItem>;
   updateProject: (id: string, updates: Partial<ProjectItem>) => void;
-  deleteProject: (id: string) => void;
+  deleteProject: (id: string) => Promise<void>;
 
   // Software & Packages Management
   softwares: SoftwareItem[];
+  installingPackageId: string | null;
+  packageInstallProgress: PackageProgressEvent | null;
+  refreshSoftwareStatuses: () => Promise<void>;
   uninstallSoftware: (id: string) => Promise<void>;
   installSoftware: (id: string) => Promise<void>;
   cleanCache: () => Promise<void>;
@@ -62,108 +66,52 @@ interface AppContextType {
   requestBatteryExemption: () => Promise<void>;
 }
 
-const initialProjects: ProjectItem[] = [
-  {
-    id: 'demo-backend-api',
-    name: 'Backend REST API',
-    stackId: 'node-api',
-    port: 3000,
-    entryFile: 'server.js',
-    startCommand: 'node server.js',
-    sourceType: 'STARTER_TEMPLATE',
-    publicUrlType: 'cloudflare',
-    envVars: [
-      { key: 'PORT', value: '3000' },
-      { key: 'NODE_ENV', value: 'production' },
-      { key: 'MONGODB_URI', value: 'mongodb+srv://demo:demo123@cluster0.mongodb.net/app_db' },
-      { key: 'JWT_SECRET', value: 'pockethost-secret-token-2026' },
-    ],
-    status: 'STOPPED',
-    uptimeSeconds: 0,
-    isDemo: true,
-    createdAt: Date.now() - 3600000 * 2,
-  },
-  {
-    id: 'demo-frontend-react',
-    name: 'React Frontend App',
-    stackId: 'react-frontend',
-    port: 5173,
-    entryFile: 'index.html',
-    startCommand: 'npx serve -s dist -l 5173',
-    sourceType: 'STARTER_TEMPLATE',
-    publicUrlType: 'zrok',
-    envVars: [
-      { key: 'VITE_API_URL', value: 'http://localhost:3000' },
-      { key: 'VITE_APP_TITLE', value: 'PocketHost React App' },
-    ],
-    status: 'STOPPED',
-    uptimeSeconds: 0,
-    isDemo: true,
-    createdAt: Date.now() - 3600000,
-  },
-  {
-    id: 'demo-python-service',
-    name: 'Python Analytics Service',
-    stackId: 'python-api',
-    port: 8000,
-    entryFile: 'app.py',
-    startCommand: 'python3 app.py',
-    sourceType: 'STARTER_TEMPLATE',
-    publicUrlType: 'local',
-    envVars: [
-      { key: 'PORT', value: '8000' },
-      { key: 'DEBUG', value: 'True' },
-      { key: 'DATABASE_URL', value: 'postgresql://user:pass@ep-serverless.aws.neon.tech/main' },
-    ],
-    status: 'STOPPED',
-    uptimeSeconds: 0,
-    isDemo: true,
-    createdAt: Date.now(),
-  },
-];
+// Initial state: ZERO dummy projects. Real state only.
+const initialProjects: ProjectItem[] = [];
 
+// Initial softwares: All marked uninstalled until queried from device storage
 const initialSoftwares: SoftwareItem[] = [
+  {
+    id: 'cloudflared',
+    name: 'Cloudflare Tunnel CLI',
+    category: 'tunnel',
+    version: 'v2026.11.1 (ARM64)',
+    sizeMb: 36.0,
+    icon: 'CF',
+    isInstalled: false,
+    path: '/data/data/com.pockethost/files/bin/cloudflared',
+    description: 'Official Cloudflare daemon exposing local ports to the internet over free *.trycloudflare.com HTTPS.',
+  },
   {
     id: 'nodejs',
     name: 'Node.js & npm',
     category: 'runtime',
-    version: 'v20.15.0 (npm v10.7.0)',
-    sizeMb: 42.5,
+    version: 'v20.18.0 (ARM64)',
+    sizeMb: 46.5,
     icon: 'JS',
-    isInstalled: true,
-    path: '/data/data/com.pockethost/files/rootfs/usr/bin/node',
+    isInstalled: false,
+    path: '/data/data/com.pockethost/files/bin/node',
     description: 'JavaScript runtime & package manager for running backend APIs and fullstack applications.',
   },
   {
     id: 'python',
     name: 'Python 3 & pip',
     category: 'runtime',
-    version: 'v3.12.3 (pip v24.0)',
+    version: 'v3.12 (ARM64)',
     sizeMb: 38.2,
     icon: 'PY',
-    isInstalled: true,
-    path: '/data/data/com.pockethost/files/rootfs/usr/bin/python3',
-    description: 'Python interpreter for Flask, FastAPI, Django, and ASGI web microservices.',
-  },
-  {
-    id: 'cloudflared',
-    name: 'Cloudflare Tunnel CLI',
-    category: 'tunnel',
-    version: 'v2024.6.1 (ARM64)',
-    sizeMb: 28.8,
-    icon: 'CF',
-    isInstalled: true,
-    path: '/data/data/com.pockethost/files/bin/cloudflared',
-    description: 'Secure outbound daemon exposing local ports to the internet over free *.trycloudflare.com HTTPS.',
+    isInstalled: false,
+    path: '/data/data/com.pockethost/files/bin/python3',
+    description: 'Python interpreter for Flask, FastAPI, and ASGI web microservices.',
   },
   {
     id: 'zrok',
     name: 'zrok Client',
     category: 'tunnel',
-    version: 'v0.4.32 (OpenZiti)',
-    sizeMb: 18.4,
+    version: 'v0.4.42 (OpenZiti)',
+    sizeMb: 24.0,
     icon: 'ZROK',
-    isInstalled: true,
+    isInstalled: false,
     path: '/data/data/com.pockethost/files/bin/zrok',
     description: 'High-speed peer-to-peer decentralized tunnel daemon for public and private access.',
   },
@@ -171,26 +119,41 @@ const initialSoftwares: SoftwareItem[] = [
     id: 'git',
     name: 'Git Version Control',
     category: 'tool',
-    version: 'v2.45.2',
+    version: 'v2.45 (ARM64)',
     sizeMb: 16.2,
     icon: 'GIT',
-    isInstalled: true,
-    path: '/data/data/com.pockethost/files/rootfs/usr/bin/git',
-    description: 'Source control tool for cloning repositories directly from GitHub, GitLab, and Bitbucket.',
+    isInstalled: false,
+    path: '/data/data/com.pockethost/files/bin/git',
+    description: 'Source control tool for cloning repositories directly from GitHub and GitLab.',
   },
   {
     id: 'proot',
     name: 'PRoot Linux Core',
     category: 'core',
-    version: 'v5.3.0 (ARM64 ptrace)',
+    version: 'v5.4.1 (ARM64 ptrace)',
     sizeMb: 4.1,
     icon: 'CORE',
-    isInstalled: true,
+    isInstalled: false,
     isCore: true,
-    path: '/data/data/com.pockethost/lib/libproot.so',
+    path: '/data/data/com.pockethost/files/bin/proot',
     description: 'System call interception layer enabling Linux userland without root permissions.',
   },
 ];
+
+const emptyFallbackProject: ProjectItem = {
+  id: '',
+  name: 'No Projects Created',
+  stackId: 'node-api',
+  port: 3000,
+  entryFile: 'server.js',
+  startCommand: 'node server.js',
+  sourceType: 'STARTER_TEMPLATE',
+  publicUrlType: 'cloudflare',
+  envVars: [],
+  status: 'STOPPED',
+  uptimeSeconds: 0,
+  createdAt: Date.now(),
+};
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
@@ -199,14 +162,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [bootstrapProgress, setBootstrapProgress] = useState<BootstrapProgressEvent | null>(null);
 
   const [projects, setProjects] = useState<ProjectItem[]>(initialProjects);
-  const [activeProjectId, setActiveProjectId] = useState<string>(initialProjects[0].id);
+  const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [softwares, setSoftwares] = useState<SoftwareItem[]>(initialSoftwares);
+  const [installingPackageId, setInstallingPackageId] = useState<string | null>(null);
+  const [packageInstallProgress, setPackageInstallProgress] = useState<PackageProgressEvent | null>(null);
+
   const [logs, setLogs] = useState<LogLine[]>([]);
-  const [localIpAddress, setLocalIpAddress] = useState<string>('192.168.29.246');
+  const [localIpAddress, setLocalIpAddress] = useState<string>('127.0.0.1');
 
   const uptimeTimersRef = useRef<Record<string, NodeJS.Timeout>>({});
 
-  const activeProject = projects.find((p) => p.id === activeProjectId) || projects[0];
+  const activeProject = projects.find((p) => p.id === activeProjectId) || projects[0] || emptyFallbackProject;
   const activeStack = SUPPORTED_STACKS.find((s) => s.id === activeProject.stackId) || SUPPORTED_STACKS[0];
 
   const totalStorageMb = softwares
@@ -252,6 +218,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch (_: any) {}
   }, []);
 
+  // Real detection of software installed on disk
+  const refreshSoftwareStatuses = useCallback(async () => {
+    try {
+      const statuses = await NativePRootBootstrap.getPackageStatuses();
+      if (statuses) {
+        setSoftwares((prev) =>
+          prev.map((item) => {
+            const diskInfo = statuses[item.id];
+            if (diskInfo) {
+              return {
+                ...item,
+                isInstalled: diskInfo.isInstalled,
+                sizeMb: diskInfo.isInstalled ? diskInfo.sizeMb : item.sizeMb,
+                path: diskInfo.path || item.path,
+                version: diskInfo.version || item.version,
+              };
+            }
+            return item;
+          })
+        );
+      }
+    } catch (e: any) {
+      console.warn('Failed to query package statuses:', e);
+    }
+  }, []);
+
   // Update a project's fields
   const updateProject = useCallback((id: string, updates: Partial<ProjectItem>) => {
     setProjects((prev) =>
@@ -259,15 +251,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   }, []);
 
-  // Create a new project
-  const createProject = useCallback((stackId: TechStackId, name?: string): ProjectItem => {
+  // Create a new project and write real files to disk
+  const createProject = useCallback(async (stackId: TechStackId, name?: string): Promise<ProjectItem> => {
     const stack = SUPPORTED_STACKS.find((s) => s.id === stackId) || SUPPORTED_STACKS[0];
     const newProjCount = projects.filter((p) => p.stackId === stackId).length + 1;
-    const projName = name || `${stack.name} Project ${newProjCount}`;
+    const projName = name || `${stack.name} ${newProjCount}`;
     const newPort = 3000 + projects.length * 100;
+    const projectId = `proj-${Date.now().toString(36)}`;
 
     const newProject: ProjectItem = {
-      id: `proj-${Date.now().toString(36)}`,
+      id: projectId,
       name: projName,
       stackId,
       port: newPort,
@@ -284,48 +277,81 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAt: Date.now(),
     };
 
+    // Write real starter template files into Android internal storage
+    try {
+      const starterFiles = getStarterFiles(stackId, newPort);
+      const filesMap: Record<string, string> = {};
+      starterFiles.forEach((f) => {
+        filesMap[f.name] = f.content;
+      });
+      await NativePRootBootstrap.writeProjectFiles(projectId, filesMap);
+      addLog(`[Project Created] Initialized ${projName} with starter code.`, 'system', 'setup', projectId, projName);
+    } catch (e: any) {
+      addLog(`[Warning] Could not write starter files: ${e.message}`, 'stderr', 'setup', projectId, projName);
+    }
+
     setProjects((prev) => [newProject, ...prev]);
-    setActiveProjectId(newProject.id);
+    setActiveProjectId(projectId);
     return newProject;
-  }, [projects]);
+  }, [projects, addLog]);
 
   // Delete project
-  const deleteProject = useCallback((id: string) => {
+  const deleteProject = useCallback(async (id: string) => {
     if (uptimeTimersRef.current[id]) {
       clearInterval(uptimeTimersRef.current[id]);
       delete uptimeTimersRef.current[id];
     }
+    try {
+      await NativePRootBootstrap.deleteProjectDir(id);
+    } catch (_: any) {}
     setProjects((prev) => prev.filter((p) => p.id !== id));
   }, []);
 
-  // Software installation / uninstallation handlers
+  // Genuine package uninstallation
   const uninstallSoftware = useCallback(async (id: string) => {
     const item = softwares.find((s) => s.id === id);
-    if (!item || item.isCore) return;
+    if (!item) return;
 
-    addLog(`[Package Manager] Uninstalling ${item.name}...`, 'system');
-    setSoftwares((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, isInstalled: false } : s))
-    );
-    addLog(`[Package Manager] Uninstalled ${item.name}. Freed ${item.sizeMb} MB.`, 'system');
-  }, [softwares, addLog]);
+    try {
+      addLog(`[Package Manager] Uninstalling ${item.name}...`, 'system');
+      await NativePRootBootstrap.uninstallPackage(id);
+      addLog(`[Package Manager] Removed ${item.name}.`, 'system');
+      await refreshSoftwareStatuses();
+    } catch (e: any) {
+      addLog(`[Error] Failed to uninstall ${item.name}: ${e.message}`, 'stderr');
+    }
+  }, [softwares, addLog, refreshSoftwareStatuses]);
 
+  // Genuine package download and installation
   const installSoftware = useCallback(async (id: string) => {
     const item = softwares.find((s) => s.id === id);
     if (!item) return;
 
-    addLog(`[Package Manager] Downloading and installing ${item.name} (${item.sizeMb} MB)...`, 'system');
-    setSoftwares((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, isInstalled: true } : s))
-    );
-    addLog(`[Package Manager] ${item.name} successfully installed at ${item.path}`, 'system');
-  }, [softwares, addLog]);
+    try {
+      setInstallingPackageId(id);
+      addLog(`[Package Manager] Starting download for ${item.name}...`, 'system');
+      await NativePRootBootstrap.installPackage(id);
+      addLog(`[Package Manager] ${item.name} successfully installed and ready!`, 'system');
+      await refreshSoftwareStatuses();
+    } catch (e: any) {
+      addLog(`[Error] Installation of ${item.name} failed: ${e.message}`, 'stderr');
+    } finally {
+      setInstallingPackageId(null);
+      setPackageInstallProgress(null);
+    }
+  }, [softwares, addLog, refreshSoftwareStatuses]);
 
   const cleanCache = useCallback(async () => {
-    addLog('[Storage] Cleaning temporary build caches and log buffers...', 'system');
-    setLogs([]);
-    addLog('[Storage] Cache purge complete. 18.4 MB temporary data cleared.', 'system');
-  }, [addLog]);
+    try {
+      addLog('[Storage] Purging temporary caches...', 'system');
+      const freedMb = await NativePRootBootstrap.cleanCache();
+      setLogs([]);
+      addLog(`[Storage] Cache purge complete. Freed ${freedMb.toFixed(1)} MB.`, 'system');
+      await refreshSoftwareStatuses();
+    } catch (e: any) {
+      addLog(`[Storage Error] ${e.message}`, 'stderr');
+    }
+  }, [addLog, refreshSoftwareStatuses]);
 
   // Start specific project
   const startProject = useCallback(async (id: string) => {
@@ -364,15 +390,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Determine public / local URL
       let activeUrl = `http://${localIpAddress}:${project.port}`;
       if (project.publicUrlType === 'cloudflare') {
-        const cleanName = project.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-        const cfRes = await NativeTunnelManager.startTunnel('cloudflare', project.port);
-        activeUrl = cfRes.url || `https://${cleanName}-${project.port}.trycloudflare.com`;
-        addLog(`[Tunnel] Cloudflare HTTPS: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+        const cfInstalled = softwares.find((s) => s.id === 'cloudflared')?.isInstalled;
+        if (!cfInstalled) {
+          addLog('[Tunnel Warning] Cloudflare binary not installed. Please install it in Packages.', 'stderr', 'tunnel', id, project.name);
+        }
+        try {
+          const cfRes = await NativeTunnelManager.startTunnel('cloudflare', project.port);
+          if (cfRes.url) {
+            activeUrl = cfRes.url;
+            addLog(`[Tunnel] Cloudflare HTTPS: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+          }
+        } catch (tErr: any) {
+          addLog(`[Tunnel Error] ${tErr.message}`, 'stderr', 'tunnel', id, project.name);
+        }
       } else if (project.publicUrlType === 'zrok') {
-        const cleanName = project.name.toLowerCase().replace(/[^a-z0-9]/g, '-');
-        const zrokRes = await NativeTunnelManager.startTunnel('zrok', project.port);
-        activeUrl = zrokRes.url || `https://${cleanName}.share.zrok.io`;
-        addLog(`[Tunnel] zrok Peer Tunnel: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+        try {
+          const zrokRes = await NativeTunnelManager.startTunnel('zrok', project.port);
+          if (zrokRes.url) {
+            activeUrl = zrokRes.url;
+            addLog(`[Tunnel] zrok Peer Tunnel: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+          }
+        } catch (tErr: any) {
+          addLog(`[Tunnel Error] ${tErr.message}`, 'stderr', 'tunnel', id, project.name);
+        }
       } else {
         addLog(`[Local] Bound to Wi-Fi LAN: ${activeUrl}`, 'system', 'network', id, project.name);
       }
@@ -386,7 +426,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       addLog(`[PocketHost] ${project.name} is LIVE on ${activeUrl}`, 'system', sessionId, id, project.name);
 
-      // Setup uptime timer for this project
       if (uptimeTimersRef.current[id]) clearInterval(uptimeTimersRef.current[id]);
       uptimeTimersRef.current[id] = setInterval(() => {
         setProjects((prev) =>
@@ -399,7 +438,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addLog(`[Error] Failed to start ${project.name}: ${e.message}`, 'stderr', 'error', id, project.name);
       updateProject(id, { status: 'FAILED' });
     }
-  }, [projects, localIpAddress, addLog, updateProject]);
+  }, [projects, localIpAddress, softwares, addLog, updateProject]);
 
   // Stop specific project
   const stopProject = useCallback(async (id: string) => {
@@ -422,7 +461,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await NativeTunnelManager.stopTunnel('zrok');
       }
 
-      // Check if any other projects are running; if not, stop foreground service
       const otherRunning = projects.some((p) => p.id !== id && p.status === 'RUNNING');
       if (!otherRunning) {
         await NativeNetworkInspector.stopForegroundService();
@@ -439,7 +477,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [projects, addLog, updateProject]);
 
-  // Restart project
   const restartProject = useCallback(async (id: string) => {
     await stopProject(id);
     setTimeout(async () => {
@@ -447,22 +484,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }, 800);
   }, [stopProject, startProject]);
 
-  // Compatibility aliases for single project
   const startDeployment = () => startProject(activeProject.id);
   const stopDeployment = () => stopProject(activeProject.id);
   const restartDeployment = () => restartProject(activeProject.id);
 
   const updateProjectConfig = (updates: Partial<ProjectConfig>) => {
-    updateProject(activeProject.id, updates);
+    if (activeProject.id) {
+      updateProject(activeProject.id, updates);
+    }
   };
 
   const setActiveStack = (stack: TechStack) => {
-    updateProject(activeProject.id, {
-      stackId: stack.id,
-      port: stack.defaultPort,
-      entryFile: stack.defaultEntry,
-      startCommand: stack.defaultCommand,
-    });
+    if (activeProject.id) {
+      updateProject(activeProject.id, {
+        stackId: stack.id,
+        port: stack.defaultPort,
+        entryFile: stack.defaultEntry,
+        startCommand: stack.defaultCommand,
+      });
+    }
   };
 
   const deploymentState: DeploymentState = {
@@ -476,12 +516,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const initializeBootstrap = async () => {
     try {
-      addLog('[Setup] Initializing Linux runtime environment...', 'system');
+      addLog('[Setup] Initializing runtime environment...', 'system');
       await NativePRootBootstrap.initializeEnvironment((progress) => {
         setBootstrapProgress(progress);
       });
       setIsBootstrapReady(true);
       setBootstrapProgress(null);
+      await refreshSoftwareStatuses();
       addLog('[Setup] Environment ready.', 'system');
     } catch (e: any) {
       addLog(`[Setup Error] ${e.message}`, 'stderr');
@@ -500,7 +541,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     refreshLocalIp();
-  }, [refreshLocalIp]);
+    refreshSoftwareStatuses();
+
+    const sub = NativePRootBootstrap.onPackageProgress((event) => {
+      setPackageInstallProgress(event);
+      if (event.status === 'INSTALLED' || event.status === 'FAILED') {
+        setInstallingPackageId(null);
+        refreshSoftwareStatuses();
+      }
+    });
+
+    return () => sub.remove();
+  }, [refreshLocalIp, refreshSoftwareStatuses]);
 
   return (
     <AppContext.Provider
@@ -519,6 +571,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateProject,
         deleteProject,
         softwares,
+        installingPackageId,
+        packageInstallProgress,
+        refreshSoftwareStatuses,
         uninstallSoftware,
         installSoftware,
         cleanCache,

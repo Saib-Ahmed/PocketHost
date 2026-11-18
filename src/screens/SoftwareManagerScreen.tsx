@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Alert,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { colors } from '../theme/colors';
 import { Card } from '../components/Card';
@@ -19,6 +20,8 @@ type FilterCategory = 'all' | 'runtime' | 'tunnel' | 'tool';
 export const SoftwareManagerScreen: React.FC = () => {
   const {
     softwares,
+    installingPackageId,
+    packageInstallProgress,
     uninstallSoftware,
     installSoftware,
     cleanCache,
@@ -66,17 +69,13 @@ export const SoftwareManagerScreen: React.FC = () => {
   const handleInstall = (item: SoftwareItem) => {
     Alert.alert(
       `Install ${item.name}?`,
-      `Download and extract ${item.name} (${item.sizeMb} MB) into your isolated Linux PRoot userland environment?`,
+      `Download and install ${item.name} (~${item.sizeMb} MB) directly onto this device?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Download & Install',
+          text: 'Install Now',
           onPress: () => {
             installSoftware(item.id);
-            Alert.alert(
-              'Installation Completed',
-              `${item.name} is now available for your hosted projects.`
-            );
           },
         },
       ]
@@ -148,77 +147,72 @@ export const SoftwareManagerScreen: React.FC = () => {
           </TouchableOpacity>
         </View>
 
-        {/* Visual Storage Bar */}
+        {/* Dynamic Storage Bar */}
         <View style={styles.barContainer}>
-          <View
-            style={[
-              styles.barSegment,
-              { flex: 42.5, backgroundColor: colors.success },
-            ]}
-          />
-          <View
-            style={[
-              styles.barSegment,
-              { flex: 38.2, backgroundColor: '#38bdf8' },
-            ]}
-          />
-          <View
-            style={[
-              styles.barSegment,
-              { flex: 28.8, backgroundColor: '#f97316' },
-            ]}
-          />
-          <View
-            style={[
-              styles.barSegment,
-              { flex: 18.4, backgroundColor: '#8b5cf6' },
-            ]}
-          />
-          <View
-            style={[
-              styles.barSegment,
-              { flex: 16.2, backgroundColor: colors.warning },
-            ]}
-          />
-          <View
-            style={[
-              styles.barSegment,
-              { flex: 4.1, backgroundColor: '#94a3b8' },
-            ]}
-          />
+          {installedCount === 0 ? (
+            <View style={[styles.barSegment, { flex: 1, backgroundColor: colors.border }]} />
+          ) : (
+            softwares
+              .filter((s) => s.isInstalled)
+              .map((s) => (
+                <View
+                  key={s.id}
+                  style={[
+                    styles.barSegment,
+                    {
+                      flex: Math.max(1, s.sizeMb),
+                      backgroundColor:
+                        s.id === 'nodejs'
+                          ? colors.success
+                          : s.id === 'python'
+                          ? '#38bdf8'
+                          : s.id === 'cloudflared'
+                          ? '#f97316'
+                          : s.id === 'zrok'
+                          ? '#8b5cf6'
+                          : s.id === 'git'
+                          ? colors.warning
+                          : '#94a3b8',
+                    },
+                  ]}
+                />
+              ))
+          )}
         </View>
 
         {/* Legend */}
         <View style={styles.legendRow}>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: colors.success }]} />
-            <Text style={styles.legendText}>Node</Text>
-          </View>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#38bdf8' }]} />
-            <Text style={styles.legendText}>Python</Text>
-          </View>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#f97316' }]} />
-            <Text style={styles.legendText}>Cloudflare</Text>
-          </View>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#8b5cf6' }]} />
-            <Text style={styles.legendText}>zrok</Text>
-          </View>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: colors.warning }]} />
-            <Text style={styles.legendText}>Git</Text>
-          </View>
-          <View style={styles.legendItem}>
-            <View style={[styles.legendDot, { backgroundColor: '#94a3b8' }]} />
-            <Text style={styles.legendText}>PRoot</Text>
-          </View>
+          {softwares.map((s) => (
+            <View key={s.id} style={[styles.legendItem, !s.isInstalled && { opacity: 0.35 }]}>
+              <View
+                style={[
+                  styles.legendDot,
+                  {
+                    backgroundColor:
+                      s.id === 'nodejs'
+                        ? colors.success
+                        : s.id === 'python'
+                        ? '#38bdf8'
+                        : s.id === 'cloudflared'
+                        ? '#f97316'
+                        : s.id === 'zrok'
+                        ? '#8b5cf6'
+                        : s.id === 'git'
+                        ? colors.warning
+                        : '#94a3b8',
+                  },
+                ]}
+              />
+              <Text style={styles.legendText}>{s.icon}</Text>
+            </View>
+          ))}
         </View>
 
         <View style={styles.storageFooter}>
           <Text style={styles.storageStatusText}>
-            ✓ {installedCount} of {softwares.length} software packages currently installed
+            {installedCount === 0
+              ? 'No packages installed yet. Tap + Install on any runtime below.'
+              : `${installedCount} of ${softwares.length} software packages currently installed`}
           </Text>
         </View>
       </Card>
@@ -330,7 +324,16 @@ export const SoftwareManagerScreen: React.FC = () => {
                 </View>
 
                 {/* Action button */}
-                {item.isInstalled ? (
+                {installingPackageId === item.id ? (
+                  <View style={styles.installingBox}>
+                    <ActivityIndicator size="small" color={colors.primary} />
+                    <Text style={styles.installingText} numberOfLines={1}>
+                      {packageInstallProgress?.percentage
+                        ? `${packageInstallProgress.percentage}%`
+                        : 'Installing...'}
+                    </Text>
+                  </View>
+                ) : item.isInstalled ? (
                   item.isCore ? (
                     <View style={styles.protectedBtn}>
                       <Text style={styles.protectedBtnText}>System Core</Text>
@@ -704,6 +707,22 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '700',
     color: '#ffffff',
+  },
+  installingBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(99, 102, 241, 0.15)',
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  installingText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.primary,
   },
   infoBox: {
     flexDirection: 'row',

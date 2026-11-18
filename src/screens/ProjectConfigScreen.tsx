@@ -39,8 +39,23 @@ export const ProjectConfigScreen: React.FC<ProjectConfigScreenProps> = ({
 
   const [settingsSubTab, setSettingsSubTab] = useState<'project' | 'packages'>('project');
 
+  const fallbackProj: ProjectItem = {
+    id: '',
+    name: 'New Project',
+    stackId: 'node-api',
+    port: 3000,
+    entryFile: 'server.js',
+    startCommand: 'node server.js',
+    sourceType: 'STARTER_TEMPLATE',
+    publicUrlType: 'cloudflare',
+    envVars: [],
+    status: 'STOPPED',
+    uptimeSeconds: 0,
+    createdAt: Date.now(),
+  };
+
   const currentId = selectedProjectId || activeProjectId;
-  const project = projects.find((p) => p.id === currentId) || projects[0];
+  const project = projects.find((p) => p.id === currentId) || projects[0] || fallbackProj;
   const stack = SUPPORTED_STACKS.find((s) => s.id === project.stackId) || SUPPORTED_STACKS[0];
 
   const [name, setName] = useState(project.name);
@@ -191,6 +206,15 @@ export const ProjectConfigScreen: React.FC<ProjectConfigScreenProps> = ({
 
       {settingsSubTab === 'packages' ? (
         <SoftwareManagerScreen />
+      ) : projects.length === 0 ? (
+        <ScrollView style={styles.scrollArea} contentContainerStyle={styles.content}>
+          <Card style={styles.card}>
+            <Text style={styles.cardTitle}>No Projects Created Yet</Text>
+            <Text style={[styles.helpText, { marginTop: 8 }]}>
+              There are no active projects to configure. Go to the Dashboard or Stacks tab to create your first mobile-hosted backend or frontend service.
+            </Text>
+          </Card>
+        </ScrollView>
       ) : (
         <ScrollView style={styles.scrollArea} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           {/* Project Switcher Bar */}
