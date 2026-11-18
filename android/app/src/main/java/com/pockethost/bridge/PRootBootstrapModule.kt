@@ -17,10 +17,16 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
 
 class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext), ActivityEventListener {
+    ReactContextBaseJavaModule(reactContext) {
+
+    private val activityEventListener = object : BaseActivityEventListener() {
+        override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+            handleActivityResult(activity, requestCode, resultCode, data)
+        }
+    }
 
     init {
-        reactContext.addActivityEventListener(this)
+        reactContext.addActivityEventListener(activityEventListener)
     }
 
     private var pendingZipPromise: Promise? = null
@@ -551,8 +557,8 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun pickProjectZip(projectId: String, promise: Promise) {
-        val currentActivity = currentActivity
-        if (currentActivity == null) {
+        val activity = reactContext.currentActivity
+        if (activity == null) {
             promise.reject("NO_ACTIVITY", "Current activity is not available.")
             return
         }
@@ -568,7 +574,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                     arrayOf("application/zip", "application/x-zip-compressed", "multipart/x-zip", "application/octet-stream", "text/*")
                 )
             }
-            currentActivity.startActivityForResult(intent, ZIP_PICKER_REQUEST_CODE)
+            activity.startActivityForResult(intent, ZIP_PICKER_REQUEST_CODE)
         } catch (e: Exception) {
             pendingZipPromise = null
             pendingZipProjectId = null
@@ -576,7 +582,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    override fun onActivityResult(activity: Activity?, requestCode: Int, resultCode: Int, data: Intent?) {
+    private fun handleActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == ZIP_PICKER_REQUEST_CODE) {
             val promise = pendingZipPromise
             val projId = pendingZipProjectId
@@ -653,10 +659,9 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    override fun onNewIntent(intent: Intent?) {}
-
     override fun invalidate() {
         super.invalidate()
+        reactContext.removeActivityEventListener(activityEventListener)
         moduleScope.cancel()
     }
 }
