@@ -55,12 +55,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
 
   const openUrl = (url?: string) => {
     if (!url) return;
-    Linking.canOpenURL(url).then((supported: boolean) => {
-      if (supported) {
-        Linking.openURL(url);
-      } else {
-        Alert.alert('Cannot Open URL', `Unable to open: ${url}`);
-      }
+    Linking.openURL(url).catch((err: any) => {
+      Alert.alert('Cannot Open URL', `Unable to open: ${url} (${err?.message || ''})`);
     });
   };
 

@@ -17,6 +17,7 @@ import { ProjectSourceType, PublicUrlType } from '../types/project';
 import { SUPPORTED_STACKS } from '../types/stack';
 import { IconTrash, IconClose, IconCheck, IconGit } from '../components/Icons';
 import { SoftwareManagerScreen } from './SoftwareManagerScreen';
+import { NativePRootBootstrap } from '../native/NativePRootBootstrap';
 
 interface ProjectConfigScreenProps {
   onSaved: () => void;

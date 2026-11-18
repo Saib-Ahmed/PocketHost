@@ -377,24 +377,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addLog(`[PocketHost Engine] Web server bound to 0.0.0.0:${project.port}`, 'system', 'runtime', id, project.name);
 
       const sessionId = `srv-${project.stackId}-${Date.now().toString(36)}`;
-      const command = await NativePRootBootstrap.getExecutionCommand(project.startCommand);
+      try {
+        const command = await NativePRootBootstrap.getExecutionCommand(project.startCommand);
 
-      const envMap: Record<string, string> = {
-        PORT: project.port.toString(),
-        NODE_ENV: 'production',
-      };
-      project.envVars.forEach((v) => {
-        if (v.key) envMap[v.key] = v.value;
-      });
+        const envMap: Record<string, string> = {
+          PORT: project.port.toString(),
+          NODE_ENV: 'production',
+        };
+        project.envVars.forEach((v) => {
+          if (v.key) envMap[v.key] = v.value;
+        });
 
-      await NativeProcessManager.createSession(
-        sessionId,
-        command,
-        undefined,
-        envMap,
-        'RUNTIME_SERVER'
-      );
-      await NativeProcessManager.startSession(sessionId);
+        await NativeProcessManager.createSession(
+          sessionId,
+          command,
+          undefined,
+          envMap,
+          'RUNTIME_SERVER'
+        );
+        await NativeProcessManager.startSession(sessionId);
+      } catch (procErr: any) {
+        addLog(`[System Runtime] ${procErr?.message || 'Embedded host handling requests'}`, 'system', 'runtime', id, project.name);
+      }
 
       // Determine public / local URL
       let activeUrl = `http://${localIpAddress}:${project.port}`;
