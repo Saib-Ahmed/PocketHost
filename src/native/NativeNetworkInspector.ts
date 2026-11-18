@@ -17,6 +17,18 @@ export interface SystemMetrics {
   isLowMemory: boolean;
 }
 
+export interface ProjectResourceMetrics {
+  projectId: string;
+  diskUsageMb: number;
+  fileCount: number;
+  requestsCount: number;
+  bytesTransferredKb: number;
+  activeConnections: number;
+  memoryMb: number;
+  cpuPercent: number;
+  isRunning: boolean;
+}
+
 export const NativeNetworkInspector = {
   isAvailable(): boolean {
     return !!getModule();
@@ -89,5 +101,23 @@ export const NativeNetworkInspector = {
       return mod.requestIgnoreBatteryOptimizations();
     }
     return true;
+  },
+
+  async getProjectResourceMetrics(projectId: string): Promise<ProjectResourceMetrics> {
+    const mod = getModule();
+    if (mod?.getProjectResourceMetrics) {
+      return mod.getProjectResourceMetrics(projectId);
+    }
+    return {
+      projectId,
+      diskUsageMb: 0.1,
+      fileCount: 1,
+      requestsCount: 0,
+      bytesTransferredKb: 0,
+      activeConnections: 0,
+      memoryMb: 0,
+      cpuPercent: 0,
+      isRunning: false,
+    };
   },
 };

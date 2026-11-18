@@ -403,18 +403,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Determine public / local URL
       let activeUrl = `http://${localIpAddress}:${project.port}`;
       if (project.publicUrlType === 'cloudflare') {
-        const cfInstalled = softwares.find((s) => s.id === 'cloudflared')?.isInstalled;
-        if (!cfInstalled) {
-          addLog('[Tunnel Warning] Cloudflare binary not installed. Please install it in Packages.', 'stderr', 'tunnel', id, project.name);
-        }
         try {
+          addLog('[Cloudflare] Connecting Quick Tunnel to Cloudflare Edge...', 'system', 'tunnel', id, project.name);
           const cfRes = await NativeTunnelManager.startTunnel('cloudflare', project.port);
-          if (cfRes.url) {
+          if (cfRes?.url) {
             activeUrl = cfRes.url;
-            addLog(`[Tunnel] Cloudflare HTTPS: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+            addLog(`[Cloudflare] Public HTTPS URL Live: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+          } else {
+            addLog(`[Cloudflare] Tunnel connecting in background... Initial local endpoint: ${activeUrl}`, 'system', 'tunnel', id, project.name);
           }
         } catch (tErr: any) {
-          addLog(`[Tunnel Error] ${tErr.message}`, 'stderr', 'tunnel', id, project.name);
+          addLog(`[Cloudflare Error] ${tErr.message}`, 'stderr', 'tunnel', id, project.name);
         }
       } else if (project.publicUrlType === 'zrok') {
         try {
@@ -567,7 +566,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    return () => sub.remove();
+    const tunnelSub = NativeTunnelManager.onUrlGenerated((event) => {
+      if (event?.url) {
+        addLog(`[Cloudflare Quick Tunnel] Public HTTPS Live: ${event.url}`, 'system', 'tunnel');
+        setProjects((prev) =>
+          prev.map((p) =>
+            p.status === 'RUNNING' && p.port === event.port
+              ? { ...p, activeUrl: event.url }
+              : p
+          )
+        );
+      }
+    });
+
+    return () => {
+      sub.remove();
+      tunnelSub.remove();
+    };
   }, [refreshLocalIp, refreshSoftwareStatuses]);
 
   return (

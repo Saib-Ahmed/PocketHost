@@ -255,7 +255,10 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         promise.resolve(map)
     }
 
-    private val embeddedServers = ConcurrentHashMap<String, EmbeddedProjectServer>()
+    companion object {
+        val embeddedServers = ConcurrentHashMap<String, EmbeddedProjectServer>()
+        fun getServer(projectId: String): EmbeddedProjectServer? = embeddedServers[projectId]
+    }
 
     @ReactMethod
     fun startProjectServer(

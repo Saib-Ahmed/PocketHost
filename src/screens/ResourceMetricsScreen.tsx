@@ -4,7 +4,6 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
   Platform,
 } from 'react-native';
 import { colors } from '../theme/colors';
@@ -13,10 +12,10 @@ import { Card } from '../components/Card';
 import { Badge } from '../components/Badge';
 import { SUPPORTED_STACKS } from '../types/stack';
 import { formatUptime } from '../utils/formatters';
-import { NativeNetworkInspector, SystemMetrics } from '../native/NativeNetworkInspector';
+import { NativeNetworkInspector, SystemMetrics, ProjectResourceMetrics } from '../native/NativeNetworkInspector';
 
 export const ResourceMetricsScreen: React.FC = () => {
-  const { projects, startProject } = useApp();
+  const { projects } = useApp();
 
   const [metrics, setMetrics] = useState<SystemMetrics>({
     totalRamMb: 6144,
@@ -33,6 +32,8 @@ export const ResourceMetricsScreen: React.FC = () => {
     isLowMemory: false,
   });
 
+  const [projectMetricsMap, setProjectMetricsMap] = useState<Record<string, ProjectResourceMetrics>>({});
+
   const fetchMetrics = useCallback(async () => {
     try {
       const data = await NativeNetworkInspector.getSystemMetrics();
@@ -40,11 +41,21 @@ export const ResourceMetricsScreen: React.FC = () => {
         setMetrics(data);
       }
     } catch (_: any) {}
-  }, []);
+
+    // Fetch individual project telemetry
+    const map: Record<string, ProjectResourceMetrics> = {};
+    for (const p of projects) {
+      try {
+        const pm = await NativeNetworkInspector.getProjectResourceMetrics(p.id);
+        if (pm) map[p.id] = pm;
+      } catch (_: any) {}
+    }
+    setProjectMetricsMap(map);
+  }, [projects]);
 
   useEffect(() => {
     fetchMetrics();
-    const timer = setInterval(fetchMetrics, 2500);
+    const timer = setInterval(fetchMetrics, 2000);
     return () => clearInterval(timer);
   }, [fetchMetrics]);
 
@@ -53,10 +64,8 @@ export const ResourceMetricsScreen: React.FC = () => {
 
   const totalRamGb = (metrics.totalRamMb / 1024).toFixed(1);
   const usedRamGb = (metrics.usedRamMb / 1024).toFixed(1);
-  const availRamGb = (metrics.availRamMb / 1024).toFixed(1);
   const ramPercentStr = metrics.ramUsagePercent.toFixed(1);
 
-  const freeStorageGb = (metrics.availStorageMb / 1024).toFixed(1);
   const totalStorageGb = (metrics.totalStorageMb / 1024).toFixed(1);
   const storageUsagePercent = metrics.totalStorageMb > 0
     ? ((metrics.usedStorageMb / metrics.totalStorageMb) * 100).toFixed(1)
@@ -99,49 +108,27 @@ export const ResourceMetricsScreen: React.FC = () => {
             <View
               style={[
                 styles.progressBarFill,
-                { width: `${Math.min(100, metrics.ramUsagePercent)}%`, backgroundColor: '#38BDF8' },
+                { width: `${metrics.ramUsagePercent}%`, backgroundColor: '#38BDF8' },
               ]}
             />
           </View>
           <Text style={styles.metricSubText}>
-            Free: {availRamGb} GB • {metrics.isLowMemory ? 'Low Memory' : 'Healthy'}
-          </Text>
-        </Card>
-
-        {/* CPU Card */}
-        <Card style={styles.metricCard}>
-          <View style={styles.metricCardHeader}>
-            <Text style={styles.metricLabel}>CPU HARDWARE</Text>
-            <View style={[styles.pillBadge, { backgroundColor: 'rgba(99, 102, 241, 0.15)' }]}>
-              <Text style={[styles.pillBadgeText, { color: '#818CF8' }]}>{metrics.cpuCores} Cores</Text>
-            </View>
-          </View>
-          <Text style={styles.metricValue}>
-            {metrics.cpuCores} <Text style={styles.metricUnit}>ARM64 Cores</Text>
-          </Text>
-          <View style={styles.progressBarBg}>
-            <View
-              style={[
-                styles.progressBarFill,
-                { width: runningCount > 0 ? '45%' : '10%', backgroundColor: colors.primary },
-              ]}
-            />
-          </View>
-          <Text style={styles.metricSubText}>
-            {runningCount > 0 ? `${runningCount} Services Active` : 'Host Engine Idle'}
+            {metrics.cpuCores} ARM64 Cores Active
           </Text>
         </Card>
 
         {/* Storage Card */}
         <Card style={styles.metricCard}>
           <View style={styles.metricCardHeader}>
-            <Text style={styles.metricLabel}>DEVICE FLASH</Text>
+            <Text style={styles.metricLabel}>FLASH STORAGE</Text>
             <View style={[styles.pillBadge, { backgroundColor: 'rgba(16, 185, 129, 0.15)' }]}>
-              <Text style={[styles.pillBadgeText, { color: colors.success }]}>{freeStorageGb}G Free</Text>
+              <Text style={[styles.pillBadgeText, { color: colors.success }]}>
+                {(metrics.availStorageMb / 1024).toFixed(0)} GB Free
+              </Text>
             </View>
           </View>
           <Text style={styles.metricValue}>
-            {freeStorageGb} <Text style={styles.metricUnit}>GB FREE</Text>
+            {storageUsagePercent}% <Text style={styles.metricUnit}>Used</Text>
           </Text>
           <View style={styles.progressBarBg}>
             <View
@@ -184,16 +171,43 @@ export const ResourceMetricsScreen: React.FC = () => {
             Foreground Service Active
           </Text>
         </Card>
+
+        {/* Concurrency / Services */}
+        <Card style={styles.metricCard}>
+          <View style={styles.metricCardHeader}>
+            <Text style={styles.metricLabel}>CONCURRENCY</Text>
+            <View style={[styles.pillBadge, { backgroundColor: 'rgba(99, 102, 241, 0.15)' }]}>
+              <Text style={[styles.pillBadgeText, { color: '#818CF8' }]}>{runningCount} Online</Text>
+            </View>
+          </View>
+          <Text style={styles.metricValue}>
+            {runningCount} <Text style={styles.metricUnit}>/ {projects.length} Services</Text>
+          </Text>
+          <View style={styles.progressBarBg}>
+            <View
+              style={[
+                styles.progressBarFill,
+                {
+                  width: `${projects.length > 0 ? (runningCount / projects.length) * 100 : 0}%`,
+                  backgroundColor: '#818CF8',
+                },
+              ]}
+            />
+          </View>
+          <Text style={styles.metricSubText}>
+            Embedded HTTP Multi-Host
+          </Text>
+        </Card>
       </View>
 
       {/* 3. Project-Wise Resource Telemetry */}
       <View style={styles.sectionHeader}>
         <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>Project-Wise Telemetry</Text>
+          <Text style={styles.sectionTitle}>Project Resource Footprint</Text>
           <Text style={styles.sectionCountText}>{runningCount} of {projects.length} Online</Text>
         </View>
         <Text style={styles.sectionSubtitle}>
-          Realtime status and uptime for your hosted projects.
+          Realtime CPU, Memory, Disk footprint, and Network requests per service.
         </Text>
       </View>
 
@@ -201,7 +215,7 @@ export const ResourceMetricsScreen: React.FC = () => {
         <Card style={styles.emptyTelemetryCard}>
           <Text style={styles.emptyTelemetryTitle}>No Active Services</Text>
           <Text style={styles.emptyTelemetrySub}>
-            You do not have any services hosted yet. Deploy a Node.js or Python service from the Dashboard to see its status here.
+            Deploy a Node.js, Next.js, or React service to see its live resource consumption here.
           </Text>
         </Card>
       ) : (
@@ -210,6 +224,7 @@ export const ResourceMetricsScreen: React.FC = () => {
             const stack = SUPPORTED_STACKS.find((s) => s.id === project.stackId) || SUPPORTED_STACKS[0];
             const isRunning = project.status === 'RUNNING';
             const isBuilding = project.status === 'BUILDING';
+            const pm = projectMetricsMap[project.id];
 
             return (
               <Card key={project.id} style={styles.projectCard}>
@@ -235,19 +250,58 @@ export const ResourceMetricsScreen: React.FC = () => {
                   />
                 </View>
 
-                {isRunning && (
+                {/* Real Resource Footprint Grid */}
+                <View style={styles.resourceGrid}>
+                  {/* Storage */}
+                  <View style={styles.resourceItem}>
+                    <Text style={styles.resourceItemLabel}>WORKSPACE FLASH</Text>
+                    <Text style={styles.resourceItemVal}>
+                      {pm ? pm.diskUsageMb.toFixed(1) : '0.1'} MB
+                    </Text>
+                    <Text style={styles.resourceItemSub}>
+                      {pm ? `${pm.fileCount} Files` : '1 File'}
+                    </Text>
+                  </View>
+
+                  {/* Network Requests */}
+                  <View style={styles.resourceItem}>
+                    <Text style={styles.resourceItemLabel}>REQUESTS SERVED</Text>
+                    <Text style={[styles.resourceItemVal, { color: '#38BDF8' }]}>
+                      {pm ? pm.requestsCount : 0} Req
+                    </Text>
+                    <Text style={styles.resourceItemSub}>
+                      {pm ? `${pm.bytesTransferredKb.toFixed(1)} KB Bandwidth` : '0 KB'}
+                    </Text>
+                  </View>
+
+                  {/* RAM Slice */}
+                  <View style={styles.resourceItem}>
+                    <Text style={styles.resourceItemLabel}>RAM CONSUMPTION</Text>
+                    <Text style={[styles.resourceItemVal, { color: isRunning ? colors.success : colors.textMuted }]}>
+                      {pm && isRunning ? `${pm.memoryMb.toFixed(1)} MB` : '0.0 MB'}
+                    </Text>
+                    <Text style={styles.resourceItemSub}>
+                      {isRunning ? 'Active Runtime' : 'Idle'}
+                    </Text>
+                  </View>
+
+                  {/* CPU & Sockets */}
+                  <View style={styles.resourceItem}>
+                    <Text style={styles.resourceItemLabel}>CPU & CONCURRENCY</Text>
+                    <Text style={[styles.resourceItemVal, { color: isRunning ? colors.warning : colors.textMuted }]}>
+                      {pm && isRunning ? `${pm.cpuPercent.toFixed(1)}%` : '0.0%'}
+                    </Text>
+                    <Text style={styles.resourceItemSub}>
+                      {pm ? `${pm.activeConnections} Active Sockets` : '0 Sockets'}
+                    </Text>
+                  </View>
+                </View>
+
+                {isRunning && project.activeUrl && (
                   <View style={styles.telemetrySection}>
-                    <View style={styles.telemetryRow}>
-                      <View style={styles.telemetryLabelWrap}>
-                        <Text style={styles.telemetryName}>Process State</Text>
-                        <Text style={styles.telemetryNumber}>Active (Port {project.port})</Text>
-                      </View>
-                    </View>
-                    {project.activeUrl && (
-                      <Text style={styles.urlDisplay} numberOfLines={1}>
-                        URL: {project.activeUrl}
-                      </Text>
-                    )}
+                    <Text style={styles.urlDisplay} numberOfLines={1}>
+                      URL: {project.activeUrl}
+                    </Text>
                   </View>
                 )}
               </Card>
@@ -273,25 +327,25 @@ const styles = StyleSheet.create({
   },
   headerTitleRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
   },
   title: {
     fontSize: 20,
     fontWeight: '800',
     color: colors.textPrimary,
-    letterSpacing: -0.3,
   },
   liveIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
     backgroundColor: 'rgba(16, 185, 129, 0.15)',
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: 'rgba(16, 185, 129, 0.3)',
-    gap: 5,
   },
   liveDot: {
     width: 6,
@@ -300,16 +354,14 @@ const styles = StyleSheet.create({
     backgroundColor: colors.success,
   },
   liveText: {
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '800',
     color: colors.success,
-    letterSpacing: 0.5,
   },
   subtitle: {
     fontSize: 12,
     color: colors.textSecondary,
-    marginTop: 4,
-    lineHeight: 17,
+    lineHeight: 16,
   },
   metricsGrid: {
     flexDirection: 'row',
@@ -318,35 +370,36 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   metricCard: {
-    width: '48.5%',
+    width: '48%',
+    flexGrow: 1,
     padding: 12,
   },
   metricCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: 8,
   },
   metricLabel: {
     fontSize: 10,
     fontWeight: '700',
-    color: colors.textMuted,
+    color: colors.textSecondary,
     letterSpacing: 0.5,
   },
   pillBadge: {
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: 10,
   },
   pillBadgeText: {
-    fontSize: 9,
+    fontSize: 10,
     fontWeight: '800',
   },
   metricValue: {
-    fontSize: 15,
+    fontSize: 18,
     fontWeight: '800',
     color: colors.textPrimary,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   metricUnit: {
     fontSize: 11,
@@ -455,34 +508,48 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: 2,
   },
-  telemetrySection: {
-    marginTop: 10,
-    paddingTop: 8,
+  resourceGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 12,
+    paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: colors.border,
   },
-  telemetryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  resourceItem: {
+    width: '48%',
+    flexGrow: 1,
+    backgroundColor: colors.surfaceHighlight,
+    borderRadius: 8,
+    padding: 8,
   },
-  telemetryLabelWrap: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    width: '100%',
+  resourceItemLabel: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: colors.textMuted,
+    letterSpacing: 0.5,
   },
-  telemetryName: {
-    fontSize: 11,
+  resourceItemVal: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  resourceItemSub: {
+    fontSize: 9,
     color: colors.textSecondary,
+    marginTop: 2,
   },
-  telemetryNumber: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.success,
+  telemetrySection: {
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(148, 163, 184, 0.1)',
   },
   urlDisplay: {
     fontSize: 10,
     fontFamily: Platform.OS === 'android' ? 'monospace' : 'Menlo',
     color: '#818CF8',
-    marginTop: 4,
   },
 });

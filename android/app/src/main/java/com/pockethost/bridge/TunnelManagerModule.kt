@@ -5,7 +5,10 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
@@ -38,6 +41,52 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    private suspend fun ensureBinary(binaryFile: File, tunnelKey: String): Boolean {
+        if (binaryFile.exists() && binaryFile.length() > 5000000L) {
+            binaryFile.setExecutable(true, false)
+            return true
+        }
+
+        if (tunnelKey != "cloudflare") return false
+
+        return withContext(Dispatchers.IO) {
+            try {
+                binaryFile.parentFile?.mkdirs()
+                val urlStr = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+                var currentUrl = urlStr
+                var conn: HttpURLConnection
+                var redirectCount = 0
+                while (true) {
+                    conn = URL(currentUrl).openConnection() as HttpURLConnection
+                    conn.instanceFollowRedirects = true
+                    conn.connectTimeout = 15000
+                    conn.readTimeout = 30000
+                    val code = conn.responseCode
+                    if ((code in 301..308) && redirectCount < 6) {
+                        currentUrl = conn.getHeaderField("Location") ?: break
+                        conn.disconnect()
+                        redirectCount++
+                        continue
+                    }
+                    break
+                }
+                val temp = File(binaryFile.parentFile, "${binaryFile.name}.tmp")
+                conn.inputStream.use { input ->
+                    FileOutputStream(temp).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                if (binaryFile.exists()) binaryFile.delete()
+                temp.renameTo(binaryFile)
+                binaryFile.setExecutable(true, false)
+                binaryFile.setReadable(true, false)
+                binaryFile.exists() && binaryFile.length() > 5000000L
+            } catch (_: Exception) {
+                false
+            }
+        }
+    }
+
     @ReactMethod
     fun startTunnel(provider: String, port: Int, promise: Promise) {
         val tunnelKey = provider.lowercase()
@@ -61,8 +110,9 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 val binaryName = if (tunnelKey == "zrok") "zrok" else "cloudflared"
                 val binaryFile = File(binDir, binaryName)
 
-                if (!binaryFile.exists() || !binaryFile.canExecute()) {
-                    val errorMsg = "${binaryName.capitalize()} binary is not installed on this device. Please install it from the Packages tab first."
+                val hasBinary = ensureBinary(binaryFile, tunnelKey)
+                if (!hasBinary) {
+                    val errorMsg = "${binaryName.capitalize()} binary is not available. Please install it from Packages & Storage."
                     emitTunnelStatus(tunnelKey, "ERROR", null)
                     withContext(Dispatchers.Main) {
                         promise.reject("BINARY_MISSING", errorMsg)
@@ -78,6 +128,10 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 }
 
                 val processBuilder = ProcessBuilder(command)
+                processBuilder.directory(reactContext.filesDir)
+                val env = processBuilder.environment()
+                env["HOME"] = reactContext.filesDir.absolutePath
+                env["TMPDIR"] = reactContext.cacheDir.absolutePath
                 processBuilder.redirectErrorStream(true)
                 val process = processBuilder.start()
 
@@ -89,18 +143,24 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 )
                 activeTunnels[tunnelKey] = instance
 
+                val urlDeferred = CompletableDeferred<String>()
+
                 val readerJob = launch {
                     try {
                         val reader = BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8))
                         var line: String? = null
                         while (isActive && reader.readLine().also { line = it } != null) {
                             val currentLine = line ?: continue
+                            android.util.Log.d("TunnelCLI", currentLine)
                             val pattern = if (tunnelKey == "zrok") zrokUrlPattern else cloudflareUrlPattern
                             val matcher = pattern.matcher(currentLine)
                             if (matcher.find()) {
                                 val url = matcher.group(0)
                                 instance.publicUrl = url
                                 instance.status = "CONNECTED"
+                                if (!urlDeferred.isCompleted) {
+                                    urlDeferred.complete(url)
+                                }
                                 emitTunnelUrl(tunnelKey, url, port)
                                 emitTunnelStatus(tunnelKey, "CONNECTED", url)
                             }
@@ -109,11 +169,21 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 }
                 instance.readerJob = readerJob
 
+                // Wait up to 8.5 seconds for tunnel URL to be established
+                val publicUrl = try {
+                    withTimeout(8500) {
+                        urlDeferred.await()
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+
                 withContext(Dispatchers.Main) {
                     val map = Arguments.createMap().apply {
                         putString("provider", tunnelKey)
                         putInt("port", port)
-                        putString("status", "CONNECTING")
+                        putString("url", publicUrl)
+                        putString("status", if (publicUrl != null) "CONNECTED" else "CONNECTING")
                     }
                     promise.resolve(map)
                 }
@@ -140,7 +210,7 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
         val event = Arguments.createMap().apply {
             putString("provider", provider)
             putString("status", status)
-            if (url != null) putString("url", url) else putNull("url")
+            if (url != null) putString("url", url)
             putDouble("timestamp", System.currentTimeMillis().toDouble())
         }
         sendEvent("onTunnelStatusChanged", event)
@@ -149,21 +219,16 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun stopTunnel(provider: String, promise: Promise) {
         val tunnelKey = provider.lowercase()
-        val instance = activeTunnels[tunnelKey]
-        if (instance == null) {
-            promise.resolve(false)
-            return
-        }
-
-        try {
+        val instance = activeTunnels.remove(tunnelKey)
+        if (instance != null) {
             instance.readerJob?.cancel()
-            instance.process?.destroy()
-            instance.status = "DISCONNECTED"
-            activeTunnels.remove(tunnelKey)
+            try {
+                instance.process?.destroy()
+            } catch (_: Exception) {}
             emitTunnelStatus(tunnelKey, "DISCONNECTED", null)
             promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("STOP_ERROR", e.message, e)
+        } else {
+            promise.resolve(false)
         }
     }
 
@@ -174,8 +239,8 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
             val map = Arguments.createMap().apply {
                 putString("provider", tunnel.provider)
                 putInt("port", tunnel.port)
-                putString("status", tunnel.status)
                 if (tunnel.publicUrl != null) putString("url", tunnel.publicUrl)
+                putString("status", tunnel.status)
             }
             array.pushMap(map)
         }
@@ -184,11 +249,11 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
 
     override fun invalidate() {
         super.invalidate()
-        moduleScope.cancel()
-        activeTunnels.values.forEach {
-            it.readerJob?.cancel()
-            it.process?.destroy()
+        activeTunnels.values.forEach { tunnel ->
+            tunnel.readerJob?.cancel()
+            try { tunnel.process?.destroy() } catch (_: Exception) {}
         }
         activeTunnels.clear()
+        moduleScope.cancel()
     }
 }

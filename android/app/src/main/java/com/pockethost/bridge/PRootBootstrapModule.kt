@@ -609,28 +609,52 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                     }
 
                     val projDir = File(getProjectsDir(), projId ?: "default")
+                    projDir.deleteRecursively()
                     projDir.mkdirs()
 
                     var extractedCount = 0
                     reactContext.contentResolver.openInputStream(uri)?.use { inStream ->
                         if (fileName.endsWith(".zip", ignoreCase = true)) {
-                            ZipInputStream(inStream.buffered()).use { zipIn ->
-                                var entry = zipIn.nextEntry
-                                while (entry != null) {
-                                    val outFile = File(projDir, entry.name)
-                                    if (entry.isDirectory) {
-                                        outFile.mkdirs()
-                                    } else {
-                                        outFile.parentFile?.mkdirs()
-                                        FileOutputStream(outFile).use { out ->
-                                            zipIn.copyTo(out)
+                            val tempZip = File(reactContext.cacheDir, "upload-${projId ?: "temp"}.zip")
+                            FileOutputStream(tempZip).use { inStream.copyTo(it) }
+
+                            val zipFile = java.util.zip.ZipFile(tempZip)
+                            val entries = zipFile.entries().toList()
+
+                            // Check if all non-hidden entries share a single root folder (e.g. "my-project/")
+                            val validEntries = entries.filter { !it.name.startsWith("__MACOSX") && !it.name.startsWith(".") }
+                            var commonPrefix: String? = null
+                            val prefixes = validEntries.mapNotNull { e ->
+                                val idx = e.name.indexOf('/')
+                                if (idx != -1) e.name.substring(0, idx + 1) else null
+                            }
+                            if (prefixes.isNotEmpty() && prefixes.size == validEntries.size && prefixes.all { it == prefixes[0] }) {
+                                commonPrefix = prefixes[0]
+                            }
+
+                            for (entry in entries) {
+                                if (entry.name.startsWith("__MACOSX")) continue
+                                var cleanName = entry.name
+                                if (commonPrefix != null && cleanName.startsWith(commonPrefix)) {
+                                    cleanName = cleanName.removePrefix(commonPrefix)
+                                }
+                                if (cleanName.isEmpty()) continue
+
+                                val outFile = File(projDir, cleanName)
+                                if (entry.isDirectory) {
+                                    outFile.mkdirs()
+                                } else {
+                                    outFile.parentFile?.mkdirs()
+                                    zipFile.getInputStream(entry).use { zIn ->
+                                        FileOutputStream(outFile).use { zOut ->
+                                            zIn.copyTo(zOut)
                                         }
-                                        extractedCount++
                                     }
-                                    zipIn.closeEntry()
-                                    entry = zipIn.nextEntry
+                                    extractedCount++
                                 }
                             }
+                            zipFile.close()
+                            tempZip.delete()
                         } else {
                             val outFile = File(projDir, fileName)
                             FileOutputStream(outFile).use { out ->
