@@ -2,7 +2,7 @@ package com.pockethost.bridge
 
 import android.content.Context
 import com.facebook.react.bridge.*
-import com.facebook.react.modules.core.DeviceEventManagerEmitter
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileOutputStream
@@ -23,7 +23,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
     private fun sendEvent(eventName: String, params: WritableMap) {
         if (reactContext.hasActiveReactInstance()) {
             reactContext
-                .getJSModule(DeviceEventManagerEmitter.DeviceEventEmitter::class.java)
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(eventName, params)
         }
     }

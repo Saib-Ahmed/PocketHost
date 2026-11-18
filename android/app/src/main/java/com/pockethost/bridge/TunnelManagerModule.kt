@@ -1,7 +1,7 @@
 package com.pockethost.bridge
 
 import com.facebook.react.bridge.*
-import com.facebook.react.modules.core.DeviceEventManagerEmitter
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
@@ -33,7 +33,7 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
     private fun sendEvent(eventName: String, params: WritableMap) {
         if (reactContext.hasActiveReactInstance()) {
             reactContext
-                .getJSModule(DeviceEventManagerEmitter.DeviceEventEmitter::class.java)
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(eventName, params)
         }
     }
@@ -116,7 +116,7 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 val readerJob = launch {
                     try {
                         val reader = BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8))
-                        var line: String?
+                        var line: String? = null
                         while (isActive && reader.readLine().also { line = it } != null) {
                             val currentLine = line ?: continue
                             val pattern = if (tunnelKey == "zrok") zrokUrlPattern else cloudflareUrlPattern

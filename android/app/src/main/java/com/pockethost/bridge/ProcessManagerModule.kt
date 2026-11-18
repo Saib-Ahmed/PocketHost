@@ -1,7 +1,7 @@
 package com.pockethost.bridge
 
 import com.facebook.react.bridge.*
-import com.facebook.react.modules.core.DeviceEventManagerEmitter
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.pockethost.model.ProcessSession
 import com.pockethost.model.ProcessStatus
 import com.pockethost.model.SessionType
@@ -24,7 +24,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
     private fun sendEvent(eventName: String, params: WritableMap) {
         if (reactContext.hasActiveReactInstance()) {
             reactContext
-                .getJSModule(DeviceEventManagerEmitter.DeviceEventEmitter::class.java)
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(eventName, params)
         }
     }
@@ -156,7 +156,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
             try {
                 val reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8))
                 val buffer = CharArray(2048)
-                var bytesRead: Int
+                var bytesRead = 0
 
                 while (isActive && reader.read(buffer).also { bytesRead = it } != -1) {
                     val text = String(buffer, 0, bytesRead)
