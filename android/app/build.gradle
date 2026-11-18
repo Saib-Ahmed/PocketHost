@@ -1,6 +1,11 @@
 apply plugin: "com.android.application"
 apply plugin: "com.facebook.react"
 
+react {
+    debuggableVariants = ["debug", "release"]
+    cliFile = file("bundle-shim.js")
+}
+
 android {
     ndkVersion rootProject.ext.has('ndkVersion') ? rootProject.ext.ndkVersion : "26.1.10909125"
     buildToolsVersion rootProject.ext.has('buildToolsVersion') ? rootProject.ext.buildToolsVersion : "35.0.0"
