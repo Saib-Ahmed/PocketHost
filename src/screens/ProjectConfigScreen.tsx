@@ -89,11 +89,25 @@ export const ProjectConfigScreen: React.FC<ProjectConfigScreenProps> = ({
     setEnvVars(project.envVars || []);
   }, [project.id]);
 
-  const handlePickZip = () => {
-    const mockZips = ['project-build.zip', 'express-api-v1.zip', 'frontend-dist.zip'];
-    const chosen = mockZips[Math.floor(Math.random() * mockZips.length)];
-    setZipFileName(chosen);
-    Alert.alert('ZIP File Selected', `Selected "${chosen}". PocketHost will automatically unpack this archive into your isolated workspace when started.`);
+  const handlePickZip = async () => {
+    try {
+      const res = await NativePRootBootstrap.pickProjectZip(project.id);
+      if (res?.success) {
+        setZipFileName(res.fileName);
+        updateProject(project.id, {
+          zipFileName: res.fileName,
+          sourceType: 'UPLOAD_ZIP',
+        });
+        Alert.alert(
+          'Files Unpacked Successfully',
+          `Extracted ${res.filesCount} file(s) from "${res.fileName}" (${res.sizeMb.toFixed(2)} MB) directly into project workspace.`
+        );
+      }
+    } catch (e: any) {
+      if (e.code !== 'CANCELLED') {
+        Alert.alert('Upload Error', e.message || 'Failed to open file picker.');
+      }
+    }
   };
 
   const handlePickFolder = () => {

@@ -70,6 +70,27 @@ export const NativeProcessManager = {
     return true;
   },
 
+  async startProjectServer(
+    projectId: string,
+    projectName: string,
+    stackId: string,
+    port: number
+  ): Promise<boolean> {
+    const mod = getModule();
+    if (mod?.startProjectServer) {
+      return mod.startProjectServer(projectId, projectName, stackId, port);
+    }
+    return true;
+  },
+
+  async stopProjectServer(projectId: string): Promise<boolean> {
+    const mod = getModule();
+    if (mod?.stopProjectServer) {
+      return mod.stopProjectServer(projectId);
+    }
+    return true;
+  },
+
   async terminateSession(sessionId: string, force: boolean = false): Promise<boolean> {
     const mod = getModule();
     if (mod) {

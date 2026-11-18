@@ -1,6 +1,10 @@
 package com.pockethost.bridge
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
@@ -10,9 +14,18 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.GZIPInputStream
+import java.util.zip.ZipInputStream
 
 class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
-    ReactContextBaseJavaModule(reactContext) {
+    ReactContextBaseJavaModule(reactContext), ActivityEventListener {
+
+    init {
+        reactContext.addActivityEventListener(this)
+    }
+
+    private var pendingZipPromise: Promise? = null
+    private var pendingZipProjectId: String? = null
+    private val ZIP_PICKER_REQUEST_CODE = 9021
 
     private val moduleScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -535,6 +548,112 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
             promise.reject("ENV_INFO_ERROR", e.message, e)
         }
     }
+
+    @ReactMethod
+    fun pickProjectZip(projectId: String, promise: Promise) {
+        val currentActivity = currentActivity
+        if (currentActivity == null) {
+            promise.reject("NO_ACTIVITY", "Current activity is not available.")
+            return
+        }
+        pendingZipPromise = promise
+        pendingZipProjectId = projectId
+
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(
+                    Intent.EXTRA_MIME_TYPES,
+                    arrayOf("application/zip", "application/x-zip-compressed", "multipart/x-zip", "application/octet-stream", "text/*")
+                )
+            }
+            currentActivity.startActivityForResult(intent, ZIP_PICKER_REQUEST_CODE)
+        } catch (e: Exception) {
+            pendingZipPromise = null
+            pendingZipProjectId = null
+            promise.reject("PICKER_ERROR", e.message, e)
+        }
+    }
+
+    override fun onActivityResult(activity: Activity?, requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == ZIP_PICKER_REQUEST_CODE) {
+            val promise = pendingZipPromise
+            val projId = pendingZipProjectId
+            pendingZipPromise = null
+            pendingZipProjectId = null
+
+            if (resultCode != Activity.RESULT_OK || data?.data == null) {
+                promise?.reject("CANCELLED", "File selection was cancelled.")
+                return
+            }
+
+            val uri: Uri = data.data!!
+            moduleScope.launch(Dispatchers.IO) {
+                try {
+                    var fileName = "project-upload.zip"
+                    var fileSize = 0L
+                    reactContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (cursor.moveToFirst()) {
+                            if (nameIndex != -1) fileName = cursor.getString(nameIndex) ?: fileName
+                            if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+                        }
+                    }
+
+                    val projDir = File(getProjectsDir(), projId ?: "default")
+                    projDir.mkdirs()
+
+                    var extractedCount = 0
+                    reactContext.contentResolver.openInputStream(uri)?.use { inStream ->
+                        if (fileName.endsWith(".zip", ignoreCase = true)) {
+                            ZipInputStream(inStream.buffered()).use { zipIn ->
+                                var entry = zipIn.nextEntry
+                                while (entry != null) {
+                                    val outFile = File(projDir, entry.name)
+                                    if (entry.isDirectory) {
+                                        outFile.mkdirs()
+                                    } else {
+                                        outFile.parentFile?.mkdirs()
+                                        FileOutputStream(outFile).use { out ->
+                                            zipIn.copyTo(out)
+                                        }
+                                        extractedCount++
+                                    }
+                                    zipIn.closeEntry()
+                                    entry = zipIn.nextEntry
+                                }
+                            }
+                        } else {
+                            val outFile = File(projDir, fileName)
+                            FileOutputStream(outFile).use { out ->
+                                inStream.copyTo(out)
+                            }
+                            extractedCount = 1
+                        }
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        val map = Arguments.createMap().apply {
+                            putBoolean("success", true)
+                            putString("fileName", fileName)
+                            putInt("filesCount", extractedCount)
+                            putDouble("sizeMb", fileSize.toDouble() / (1024.0 * 1024.0))
+                            putString("projectDir", projDir.absolutePath)
+                        }
+                        promise?.resolve(map)
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        promise?.reject("EXTRACT_ERROR", e.message, e)
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {}
 
     override fun invalidate() {
         super.invalidate()

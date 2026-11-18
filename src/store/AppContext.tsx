@@ -367,6 +367,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         `Running on port ${project.port} • ${project.publicUrlType.toUpperCase()}`
       );
 
+      // Start real embedded HTTP server listening on 0.0.0.0:port
+      await NativeProcessManager.startProjectServer(
+        project.id,
+        project.name,
+        project.stackId,
+        project.port
+      );
+      addLog(`[PocketHost Engine] Web server bound to 0.0.0.0:${project.port}`, 'system', 'runtime', id, project.name);
+
       const sessionId = `srv-${project.stackId}-${Date.now().toString(36)}`;
       const command = await NativePRootBootstrap.getExecutionCommand(project.startCommand);
 
@@ -455,6 +464,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (project.activeSessionId) {
         await NativeProcessManager.terminateSession(project.activeSessionId, false);
       }
+      // Stop embedded HTTP server
+      await NativeProcessManager.stopProjectServer(id);
+
       if (project.publicUrlType === 'cloudflare') {
         await NativeTunnelManager.stopTunnel('cloudflare');
       } else if (project.publicUrlType === 'zrok') {

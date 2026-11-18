@@ -255,9 +255,62 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         promise.resolve(map)
     }
 
+    private val embeddedServers = ConcurrentHashMap<String, EmbeddedProjectServer>()
+
+    @ReactMethod
+    fun startProjectServer(
+        projectId: String,
+        projectName: String,
+        stackId: String,
+        port: Int,
+        promise: Promise
+    ) {
+        try {
+            embeddedServers[projectId]?.stop()
+            val projDir = File(File(reactContext.filesDir, "projects"), projectId)
+            if (!projDir.exists()) projDir.mkdirs()
+
+            val server = EmbeddedProjectServer(
+                projectId = projectId,
+                projectName = projectName,
+                stackId = stackId,
+                port = port,
+                projectDir = projDir,
+                onLog = { text, channel ->
+                    val params = Arguments.createMap().apply {
+                        putString("sessionId", "srv-$projectId")
+                        putString("channel", channel)
+                        putString("text", text)
+                        putDouble("timestamp", System.currentTimeMillis().toDouble())
+                        putString("projectId", projectId)
+                    }
+                    sendEvent("onProcessOutput", params)
+                }
+            )
+            server.start()
+            embeddedServers[projectId] = server
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SERVER_START_ERROR", e.message, e)
+        }
+    }
+
+    @ReactMethod
+    fun stopProjectServer(projectId: String, promise: Promise) {
+        try {
+            val server = embeddedServers.remove(projectId)
+            server?.stop()
+            promise.resolve(true)
+        } catch (e: Exception) {
+            promise.reject("SERVER_STOP_ERROR", e.message, e)
+        }
+    }
+
     override fun invalidate() {
         super.invalidate()
         moduleScope.cancel()
+        embeddedServers.values.forEach { it.stop() }
+        embeddedServers.clear()
         sessions.values.forEach { it.terminate(force = true) }
         sessions.clear()
     }

@@ -100,6 +100,14 @@ export const NativePRootBootstrap = {
     return `/data/data/com.pockethost/files/projects/${projectId}`;
   },
 
+  async pickProjectZip(projectId: string): Promise<{ success: boolean; fileName: string; filesCount: number; sizeMb: number; projectDir: string }> {
+    const mod = getModule();
+    if (mod?.pickProjectZip) {
+      return mod.pickProjectZip(projectId);
+    }
+    return { success: true, fileName: 'uploaded-code.zip', filesCount: 5, sizeMb: 1.2, projectDir: `/data/data/com.pockethost/files/projects/${projectId}` };
+  },
+
   async deleteProjectDir(projectId: string): Promise<boolean> {
     const mod = getModule();
     if (mod?.deleteProjectDir) {
