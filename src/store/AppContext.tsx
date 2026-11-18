@@ -61,6 +61,7 @@ interface AppContextType {
   clearLogs: (projectId?: string) => void;
 
   sendStdin: (input: string) => Promise<void>;
+  executeTerminalCommand: (command: string, projectId?: string) => Promise<void>;
   localIpAddress: string;
   refreshLocalIp: () => Promise<void>;
   requestBatteryExemption: () => Promise<void>;
@@ -76,32 +77,32 @@ const initialSoftwares: SoftwareItem[] = [
     name: 'Cloudflare Tunnel CLI',
     category: 'tunnel',
     version: 'v2026.11.1 (ARM64)',
-    sizeMb: 36.0,
+    sizeMb: 37.8,
     icon: 'CF',
     isInstalled: false,
-    path: '/data/data/com.pockethost/files/bin/cloudflared',
+    path: '/data/app/.../libcloudflared.so',
     description: 'Official Cloudflare daemon exposing local ports to the internet over free *.trycloudflare.com HTTPS.',
   },
   {
     id: 'nodejs',
     name: 'Node.js & npm',
     category: 'runtime',
-    version: 'v20.18.0 (ARM64)',
-    sizeMb: 46.5,
+    version: 'v20.15.1 (Alpine Linux)',
+    sizeMb: 75.0,
     icon: 'JS',
     isInstalled: false,
-    path: '/data/data/com.pockethost/files/bin/node',
-    description: 'JavaScript runtime & package manager for running backend APIs and fullstack applications.',
+    path: '/data/data/com.pockethost/files/rootfs/usr/bin/node',
+    description: 'JavaScript runtime & npm package manager for running backend APIs and fullstack applications.',
   },
   {
     id: 'python',
     name: 'Python 3 & pip',
     category: 'runtime',
-    version: 'v3.12 (ARM64)',
-    sizeMb: 38.2,
+    version: 'Python 3.12 (Alpine Linux)',
+    sizeMb: 60.0,
     icon: 'PY',
     isInstalled: false,
-    path: '/data/data/com.pockethost/files/bin/python3',
+    path: '/data/data/com.pockethost/files/rootfs/usr/bin/python3',
     description: 'Python interpreter for Flask, FastAPI, and ASGI web microservices.',
   },
   {
@@ -119,23 +120,23 @@ const initialSoftwares: SoftwareItem[] = [
     id: 'git',
     name: 'Git Version Control',
     category: 'tool',
-    version: 'v2.45 (ARM64)',
-    sizeMb: 16.2,
+    version: 'Git (Alpine Linux)',
+    sizeMb: 25.0,
     icon: 'GIT',
     isInstalled: false,
-    path: '/data/data/com.pockethost/files/bin/git',
+    path: '/data/data/com.pockethost/files/rootfs/usr/bin/git',
     description: 'Source control tool for cloning repositories directly from GitHub and GitLab.',
   },
   {
     id: 'proot',
     name: 'PRoot Linux Core',
     category: 'core',
-    version: 'v5.4.1 (ARM64 ptrace)',
+    version: 'v5.5.0 (ARM64 ptrace)',
     sizeMb: 4.1,
     icon: 'CORE',
     isInstalled: false,
     isCore: true,
-    path: '/data/data/com.pockethost/files/bin/proot',
+    path: '/data/app/.../libproot.so',
     description: 'System call interception layer enabling Linux userland without root permissions.',
   },
 ];
@@ -196,7 +197,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         text,
         timestamp: Date.now(),
       };
-      setLogs((prev) => [...prev.slice(-500), newLine]);
+      setLogs((prev) => [...prev.slice(-1000), newLine]);
     },
     []
   );
@@ -329,7 +330,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     try {
       setInstallingPackageId(id);
-      addLog(`[Package Manager] Starting download for ${item.name}...`, 'system');
+      addLog(`[Package Manager] Starting installation of ${item.name}...`, 'system');
       await NativePRootBootstrap.installPackage(id);
       addLog(`[Package Manager] ${item.name} successfully installed and ready!`, 'system');
       await refreshSoftwareStatuses();
@@ -353,80 +354,150 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [addLog, refreshSoftwareStatuses]);
 
-  // Start specific project
+  // Render/Vercel Lifecycle: Pre-flight check -> Build -> Run daemon -> Cloudflare Quick Tunnel
   const startProject = useCallback(async (id: string) => {
     const project = projects.find((p) => p.id === id);
     if (!project) return;
 
     try {
-      updateProject(id, { status: 'BUILDING' });
-      addLog(`[PocketHost] Starting build for ${project.name}...`, 'system', 'build', id, project.name);
+      updateProject(id, { status: 'BUILDING', activeUrl: undefined });
+      addLog(`==> Deploying service: ${project.name}`, 'system', 'build', id, project.name);
 
-      await NativeNetworkInspector.startForegroundService(
-        `PocketHost: ${project.name}`,
-        `Running on port ${project.port} • ${project.publicUrlType.toUpperCase()}`
-      );
+      const envInfo = await NativePRootBootstrap.getEnvironmentInfo();
+      const projectWorkspace = `${envInfo.projectsDir}/${project.id}`;
 
-      // Start real embedded HTTP server listening on 0.0.0.0:port
-      await NativeProcessManager.startProjectServer(
-        project.id,
-        project.name,
-        project.stackId,
-        project.port
-      );
-      addLog(`[PocketHost Engine] Web server bound to 0.0.0.0:${project.port}`, 'system', 'runtime', id, project.name);
+      // 1. Runtime Prerequisite Verification
+      const isNodeBased = project.stackId.includes('node') || project.stackId.includes('next') || project.stackId.includes('react');
+      const isPythonBased = project.stackId.includes('python');
 
-      const sessionId = `srv-${project.stackId}-${Date.now().toString(36)}`;
-      try {
-        const command = await NativePRootBootstrap.getExecutionCommand(project.startCommand);
-
-        const envMap: Record<string, string> = {
-          PORT: project.port.toString(),
-          NODE_ENV: 'production',
-        };
-        project.envVars.forEach((v) => {
-          if (v.key) envMap[v.key] = v.value;
-        });
-
-        await NativeProcessManager.createSession(
-          sessionId,
-          command,
-          undefined,
-          envMap,
-          'RUNTIME_SERVER'
-        );
-        await NativeProcessManager.startSession(sessionId);
-      } catch (procErr: any) {
-        addLog(`[System Runtime] ${procErr?.message || 'Embedded host handling requests'}`, 'system', 'runtime', id, project.name);
+      if (isNodeBased) {
+        addLog(`==> Checking Node.js runtime...`, 'system', 'build', id, project.name);
+        const nodeCheck = await NativePRootBootstrap.executeShellCommand('node -v', projectWorkspace);
+        if (nodeCheck.exitCode !== 0 || !nodeCheck.stdout.trim().startsWith('v')) {
+          addLog(`[Build Error] Node.js is not installed on this device.`, 'stderr', 'build', id, project.name);
+          addLog(`[Build Error] Please open "Packages & Storage" tab and tap "Install" next to Node.js & npm.`, 'stderr', 'build', id, project.name);
+          updateProject(id, { status: 'FAILED' });
+          return;
+        }
+        addLog(`==> Using Node.js ${nodeCheck.stdout.trim()}`, 'system', 'build', id, project.name);
+      } else if (isPythonBased) {
+        addLog(`==> Checking Python 3 runtime...`, 'system', 'build', id, project.name);
+        const pyCheck = await NativePRootBootstrap.executeShellCommand('python3 --version', projectWorkspace);
+        if (pyCheck.exitCode !== 0) {
+          addLog(`[Build Error] Python 3 is not installed on this device.`, 'stderr', 'build', id, project.name);
+          addLog(`[Build Error] Please open "Packages & Storage" tab and tap "Install" next to Python 3.`, 'stderr', 'build', id, project.name);
+          updateProject(id, { status: 'FAILED' });
+          return;
+        }
+        addLog(`==> Using ${pyCheck.stdout.trim()}`, 'system', 'build', id, project.name);
       }
 
-      // Determine public / local URL
-      let activeUrl = `http://${localIpAddress}:${project.port}`;
+      // 2. Build & Dependency Resolution Phase
+      addLog(`==> Inspecting project directory...`, 'system', 'build', id, project.name);
+      const lsCheck = await NativePRootBootstrap.executeShellCommand('ls -la', projectWorkspace);
+      if (lsCheck.exitCode !== 0) {
+        addLog(`[Build Error] Project workspace does not exist.`, 'stderr', 'build', id, project.name);
+        updateProject(id, { status: 'FAILED' });
+        return;
+      }
+
+      if (isNodeBased) {
+        const pkgCheck = await NativePRootBootstrap.executeShellCommand('[ -f package.json ] && echo "FOUND"', projectWorkspace);
+        if (pkgCheck.stdout.trim() === 'FOUND') {
+          const nmCheck = await NativePRootBootstrap.executeShellCommand('[ -d node_modules ] && echo "EXISTS"', projectWorkspace);
+          if (nmCheck.stdout.trim() !== 'EXISTS') {
+            addLog(`==> package.json detected. Installing dependencies via npm...`, 'system', 'build', id, project.name);
+            const npmRes = await NativePRootBootstrap.executeShellCommand('npm install --prefer-offline --no-audit', projectWorkspace);
+            if (npmRes.stdout) {
+              npmRes.stdout.split('\n').filter(Boolean).forEach((line) => addLog(line, 'stdout', 'build', id, project.name));
+            }
+            if (npmRes.stderr) {
+              npmRes.stderr.split('\n').filter(Boolean).forEach((line) => addLog(line, 'stderr', 'build', id, project.name));
+            }
+            if (npmRes.exitCode !== 0) {
+              addLog(`[Build Failed] npm install failed with exit code ${npmRes.exitCode}`, 'stderr', 'build', id, project.name);
+              updateProject(id, { status: 'FAILED' });
+              return;
+            }
+          }
+        }
+      } else if (isPythonBased) {
+        const reqCheck = await NativePRootBootstrap.executeShellCommand('[ -f requirements.txt ] && echo "FOUND"', projectWorkspace);
+        if (reqCheck.stdout.trim() === 'FOUND') {
+          addLog(`==> requirements.txt detected. Installing Python dependencies...`, 'system', 'build', id, project.name);
+          const pipRes = await NativePRootBootstrap.executeShellCommand('pip install --no-cache-dir -r requirements.txt', projectWorkspace);
+          if (pipRes.stdout) {
+            pipRes.stdout.split('\n').filter(Boolean).forEach((line) => addLog(line, 'stdout', 'build', id, project.name));
+          }
+          if (pipRes.stderr) {
+            pipRes.stderr.split('\n').filter(Boolean).forEach((line) => addLog(line, 'stderr', 'build', id, project.name));
+          }
+          if (pipRes.exitCode !== 0) {
+            addLog(`[Build Failed] pip install failed with exit code ${pipRes.exitCode}`, 'stderr', 'build', id, project.name);
+            updateProject(id, { status: 'FAILED' });
+            return;
+          }
+        }
+      }
+
+      // Verify entry file exists
+      if (project.entryFile) {
+        const entryCheck = await NativePRootBootstrap.executeShellCommand(`[ -f "${project.entryFile}" ] && echo "EXISTS"`, projectWorkspace);
+        const hasPackageJson = (await NativePRootBootstrap.executeShellCommand('[ -f package.json ] && echo "YES"', projectWorkspace)).stdout.trim() === 'YES';
+        if (entryCheck.stdout.trim() !== 'EXISTS' && !hasPackageJson) {
+          addLog(`[Build Error] Entry file '${project.entryFile}' was not found in project workspace.`, 'stderr', 'build', id, project.name);
+          updateProject(id, { status: 'FAILED' });
+          return;
+        }
+      }
+
+      // 3. Start Phase - Run Real Daemon inside PRoot
+      addLog(`==> Starting runtime service: ${project.startCommand}`, 'system', 'runtime', id, project.name);
+      await NativeNetworkInspector.startForegroundService(
+        `PocketHost: ${project.name}`,
+        `Port ${project.port} • ${project.publicUrlType.toUpperCase()}`
+      );
+
+      const sessionId = `srv-${project.id}`;
+      const envMap: Record<string, string> = {
+        PORT: project.port.toString(),
+        NODE_ENV: 'production',
+      };
+      project.envVars.forEach((v) => {
+        if (v.key) envMap[v.key] = v.value;
+      });
+
+      const commandParts = project.startCommand.split(/\s+/).filter(Boolean);
+
+      await NativeProcessManager.createSession(
+        sessionId,
+        commandParts,
+        projectWorkspace,
+        envMap,
+        'RUNTIME_SERVER'
+      );
+      await NativeProcessManager.startSession(sessionId);
+
+      addLog(`==> Daemon process running on 0.0.0.0:${project.port}`, 'system', sessionId, id, project.name);
+
+      // 4. Cloudflare Quick Tunnel Phase
+      let activeUrl: string | undefined = undefined;
       if (project.publicUrlType === 'cloudflare') {
+        addLog(`==> Establishing Cloudflare Quick Tunnel on port ${project.port}...`, 'system', 'tunnel', id, project.name);
         try {
-          addLog('[Cloudflare] Connecting Quick Tunnel to Cloudflare Edge...', 'system', 'tunnel', id, project.name);
           const cfRes = await NativeTunnelManager.startTunnel('cloudflare', project.port);
-          if (cfRes?.url) {
+          if (cfRes?.url && cfRes.url.includes('trycloudflare.com')) {
             activeUrl = cfRes.url;
-            addLog(`[Cloudflare] Public HTTPS URL Live: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+            addLog(`==> Cloudflare Tunnel Live: ${activeUrl}`, 'system', 'tunnel', id, project.name);
           } else {
-            addLog(`[Cloudflare] Tunnel connecting in background... Initial local endpoint: ${activeUrl}`, 'system', 'tunnel', id, project.name);
+            addLog(`[Cloudflare Error] Cloudflare Edge tunnel timed out.`, 'stderr', 'tunnel', id, project.name);
           }
         } catch (tErr: any) {
           addLog(`[Cloudflare Error] ${tErr.message}`, 'stderr', 'tunnel', id, project.name);
         }
-      } else if (project.publicUrlType === 'zrok') {
-        try {
-          const zrokRes = await NativeTunnelManager.startTunnel('zrok', project.port);
-          if (zrokRes.url) {
-            activeUrl = zrokRes.url;
-            addLog(`[Tunnel] zrok Peer Tunnel: ${activeUrl}`, 'system', 'tunnel', id, project.name);
-          }
-        } catch (tErr: any) {
-          addLog(`[Tunnel Error] ${tErr.message}`, 'stderr', 'tunnel', id, project.name);
-        }
-      } else {
-        addLog(`[Local] Bound to Wi-Fi LAN: ${activeUrl}`, 'system', 'network', id, project.name);
+      } else if (project.publicUrlType === 'local') {
+        activeUrl = `http://${localIpAddress}:${project.port}`;
+        addLog(`==> Local Network Endpoint: ${activeUrl}`, 'system', 'network', id, project.name);
       }
 
       updateProject(id, {
@@ -435,8 +506,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeSessionId: sessionId,
         uptimeSeconds: 0,
       });
-
-      addLog(`[PocketHost] ${project.name} is LIVE on ${activeUrl}`, 'system', sessionId, id, project.name);
 
       if (uptimeTimersRef.current[id]) clearInterval(uptimeTimersRef.current[id]);
       uptimeTimersRef.current[id] = setInterval(() => {
@@ -447,10 +516,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }, 1000);
     } catch (e: any) {
-      addLog(`[Error] Failed to start ${project.name}: ${e.message}`, 'stderr', 'error', id, project.name);
+      addLog(`[Deployment Error] Failed to start ${project.name}: ${e.message}`, 'stderr', 'error', id, project.name);
       updateProject(id, { status: 'FAILED' });
     }
-  }, [projects, localIpAddress, softwares, addLog, updateProject]);
+  }, [projects, localIpAddress, addLog, updateProject]);
 
   // Stop specific project
   const stopProject = useCallback(async (id: string) => {
@@ -467,8 +536,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (project.activeSessionId) {
         await NativeProcessManager.terminateSession(project.activeSessionId, false);
       }
-      // Stop embedded HTTP server
-      await NativeProcessManager.stopProjectServer(id);
 
       if (project.publicUrlType === 'cloudflare') {
         await NativeTunnelManager.stopTunnel('cloudflare');
@@ -531,14 +598,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const initializeBootstrap = async () => {
     try {
-      addLog('[Setup] Initializing runtime environment...', 'system');
+      addLog('[Setup] Initializing PRoot Linux userland...', 'system');
       await NativePRootBootstrap.initializeEnvironment((progress) => {
         setBootstrapProgress(progress);
       });
       setIsBootstrapReady(true);
       setBootstrapProgress(null);
       await refreshSoftwareStatuses();
-      addLog('[Setup] Environment ready.', 'system');
+      addLog('[Setup] PRoot Linux userland ready.', 'system');
     } catch (e: any) {
       addLog(`[Setup Error] ${e.message}`, 'stderr');
     }
@@ -549,6 +616,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await NativeProcessManager.writeStdin(activeProject.activeSessionId, input);
     }
   };
+
+  // Real shell command execution in Terminal
+  const executeTerminalCommand = useCallback(async (command: string, projectId?: string) => {
+    const trimmed = command.trim();
+    if (!trimmed) return;
+
+    const targetProj = projectId ? projects.find((p) => p.id === projectId) : activeProject;
+    const envInfo = await NativePRootBootstrap.getEnvironmentInfo();
+    const workspace = targetProj?.id ? `${envInfo.projectsDir}/${targetProj.id}` : envInfo.rootDir;
+
+    addLog(`$ ${trimmed}`, 'stdout', 'terminal', targetProj?.id, targetProj?.name);
+
+    // If active session is running and input is interactive (not a new command):
+    if (
+      targetProj?.activeSessionId &&
+      targetProj.status === 'RUNNING' &&
+      !trimmed.startsWith('ls') &&
+      !trimmed.startsWith('node') &&
+      !trimmed.startsWith('npm') &&
+      !trimmed.startsWith('python') &&
+      !trimmed.startsWith('cat') &&
+      !trimmed.startsWith('apk') &&
+      !trimmed.startsWith('pwd') &&
+      !trimmed.startsWith('cloudflared')
+    ) {
+      try {
+        await NativeProcessManager.writeStdin(targetProj.activeSessionId, trimmed + '\n');
+        return;
+      } catch (_: any) {}
+    }
+
+    try {
+      const res = await NativePRootBootstrap.executeShellCommand(trimmed, workspace);
+      if (res.stdout) {
+        res.stdout.split('\n').forEach((line) => {
+          if (line) addLog(line, 'stdout', 'terminal', targetProj?.id, targetProj?.name);
+        });
+      }
+      if (res.stderr) {
+        res.stderr.split('\n').forEach((line) => {
+          if (line) addLog(line, 'stderr', 'terminal', targetProj?.id, targetProj?.name);
+        });
+      }
+      if (res.exitCode !== 0) {
+        addLog(`[Process exited with code ${res.exitCode}]`, 'stderr', 'terminal', targetProj?.id, targetProj?.name);
+      }
+    } catch (e: any) {
+      addLog(`[Error] Shell execution failed: ${e.message}`, 'stderr', 'terminal', targetProj?.id, targetProj?.name);
+    }
+  }, [projects, activeProject, addLog]);
 
   const requestBatteryExemption = async () => {
     await NativeNetworkInspector.requestIgnoreBatteryOptimizations();
@@ -567,7 +684,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     const tunnelSub = NativeTunnelManager.onUrlGenerated((event) => {
-      if (event?.url) {
+      if (event?.url && event.url.includes('trycloudflare.com')) {
         addLog(`[Cloudflare Quick Tunnel] Public HTTPS Live: ${event.url}`, 'system', 'tunnel');
         setProjects((prev) =>
           prev.map((p) =>
@@ -579,11 +696,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
+    // Real Process Stdout / Stderr Stream
+    const procOutputSub = NativeProcessManager.onOutput((event) => {
+      if (event?.text) {
+        const lines = event.text.split('\n');
+        lines.forEach((line) => {
+          if (line) {
+            addLog(
+              line,
+              event.streamType === 'stderr' ? 'stderr' : 'stdout',
+              event.sessionId
+            );
+          }
+        });
+      }
+    });
+
+    const procStatusSub = NativeProcessManager.onStatusChange((event) => {
+      if (event?.sessionId) {
+        if (event.status === 'FAILED' || event.status === 'STOPPED') {
+          setProjects((prev) =>
+            prev.map((p) =>
+              p.activeSessionId === event.sessionId
+                ? { ...p, status: event.status === 'FAILED' ? 'FAILED' : 'STOPPED' }
+                : p
+            )
+          );
+        }
+      }
+    });
+
     return () => {
       sub.remove();
       tunnelSub.remove();
+      procOutputSub.remove();
+      procStatusSub.remove();
     };
-  }, [refreshLocalIp, refreshSoftwareStatuses]);
+  }, [refreshLocalIp, refreshSoftwareStatuses, addLog]);
 
   return (
     <AppContext.Provider
@@ -621,6 +770,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addLog,
         clearLogs,
         sendStdin,
+        executeTerminalCommand,
         localIpAddress,
         refreshLocalIp,
         requestBatteryExemption,

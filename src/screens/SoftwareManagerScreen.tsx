@@ -150,7 +150,7 @@ export const SoftwareManagerScreen: React.FC = () => {
         {/* Dynamic Storage Bar */}
         <View style={styles.barContainer}>
           {installedCount === 0 ? (
-            <View style={[styles.barSegment, { flex: 1, backgroundColor: colors.border }]} />
+            <View style={[styles.barSegment, { flex: 1, backgroundColor: colors.cardBorder }]} />
           ) : (
             softwares
               .filter((s) => s.isInstalled)

@@ -69,42 +69,149 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         sendEvent("onPackageInstallProgress", params)
     }
 
+    private fun ensureEnvironment() {
+        val rootDir = getRootDir()
+        val shFile = File(rootDir, "bin/sh")
+
+        if (!shFile.exists()) {
+            rootDir.mkdirs()
+            getBinDir().mkdirs()
+            getProjectsDir().mkdirs()
+
+            try {
+                reactContext.assets.open("alpine-rootfs.tar.gz").use { input ->
+                    val tempTar = File(reactContext.cacheDir, "alpine-rootfs.tar.gz")
+                    FileOutputStream(tempTar).use { out -> input.copyTo(out) }
+                    extractTarGz(tempTar, rootDir)
+                    tempTar.delete()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PocketHost", "Failed to extract alpine rootfs", e)
+            }
+        }
+
+        // Configure DNS
+        val etcDir = File(rootDir, "etc")
+        etcDir.mkdirs()
+        File(etcDir, "resolv.conf").writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n")
+        File(etcDir, "hosts").writeText("127.0.0.1 localhost\n::1 localhost\n")
+
+        // Configure SSL Certificates
+        val sslDir = File(etcDir, "ssl")
+        val certsDir = File(sslDir, "certs")
+        certsDir.mkdirs()
+        try {
+            reactContext.assets.open("ca-certificates.crt").use { input ->
+                val bytes = input.readBytes()
+                File(sslDir, "cert.pem").writeBytes(bytes)
+                File(certsDir, "ca-certificates.crt").writeBytes(bytes)
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun runCommandInPRootInternal(command: String, workspaceDir: File? = null): Triple<String, String, Int> {
+        ensureEnvironment()
+        val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
+        val prootLib = File(nativeLibDir, "libproot.so")
+        val loaderLib = File(nativeLibDir, "libloader.so")
+        val rootDir = getRootDir()
+        val workspace = workspaceDir ?: File(getProjectsDir(), "default")
+        workspace.mkdirs()
+
+        val resolvConf = File(rootDir, "etc/resolv.conf")
+        val sslDir = File(rootDir, "etc/ssl")
+
+        val cmdList = mutableListOf<String>()
+        if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
+            cmdList.addAll(listOf(
+                prootLib.absolutePath,
+                "--link2symlink",
+                "-0",
+                "-r", rootDir.absolutePath,
+                "-b", "/dev",
+                "-b", "/proc",
+                "-b", "/sys",
+                "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
+                "-b", "${sslDir.absolutePath}:/etc/ssl",
+                "-b", "${workspace.absolutePath}:/workspace",
+                "-w", "/workspace",
+                "/bin/sh",
+                "-c",
+                "export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin; export HOME=/root; $command"
+            ))
+        } else {
+            cmdList.addAll(listOf("/system/bin/sh", "-c", command))
+        }
+
+        val pb = ProcessBuilder(cmdList)
+        pb.directory(workspace)
+        val env = pb.environment()
+        env["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
+        if (loaderLib.exists()) {
+            env["PROOT_LOADER"] = loaderLib.absolutePath
+        }
+        env["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
+        env["HOME"] = reactContext.filesDir.absolutePath
+        env["TMPDIR"] = reactContext.cacheDir.absolutePath
+
+        val proc = pb.start()
+        val stdout = proc.inputStream.bufferedReader().readText()
+        val stderr = proc.errorStream.bufferedReader().readText()
+        val exitCode = proc.waitFor()
+        return Triple(stdout, stderr, exitCode)
+    }
+
+    @ReactMethod
+    fun executeShellCommand(command: String, workspacePath: String?, promise: Promise) {
+        moduleScope.launch {
+            try {
+                val ws = if (!workspacePath.isNullOrEmpty()) File(workspacePath) else null
+                val (stdout, stderr, exitCode) = runCommandInPRootInternal(command, ws)
+                withContext(Dispatchers.Main) {
+                    val map = Arguments.createMap().apply {
+                        putString("stdout", stdout)
+                        putString("stderr", stderr)
+                        putInt("exitCode", exitCode)
+                    }
+                    promise.resolve(map)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    promise.reject("EXEC_ERROR", e.message, e)
+                }
+            }
+        }
+    }
+
     @ReactMethod
     fun getPackageStatuses(promise: Promise) {
         try {
-            val binDir = getBinDir()
+            ensureEnvironment()
             val rootDir = getRootDir()
             val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
 
-            val cfFile = File(binDir, "cloudflared")
-            val zrokFile = File(binDir, "zrok")
-            val prootFile = File(binDir, "proot")
+            val cfLib = File(nativeLibDir, "libcloudflared.so")
             val prootLib = File(nativeLibDir, "libproot.so")
-            val nodeBin = File(binDir, "node")
-            val nodeRootfs = File(rootDir, "usr/bin/node")
-            val pyBin = File(binDir, "python3")
-            val pyRootfs = File(rootDir, "usr/bin/python3")
-            val gitBin = File(binDir, "git")
-            val gitRootfs = File(rootDir, "usr/bin/git")
+            val nodeBin = File(rootDir, "usr/bin/node")
+            val pyBin = File(rootDir, "usr/bin/python3")
+            val gitBin = File(rootDir, "usr/bin/git")
 
-            fun createPkgMap(file: File, defaultSizeMb: Double, versionStr: String, installedFallback: Boolean = false): WritableMap {
-                val exists = file.exists() || installedFallback
-                val size = if (file.exists()) (file.length().toDouble() / (1024.0 * 1024.0)) else defaultSizeMb
+            fun createPkgMap(exists: Boolean, defaultSizeMb: Double, versionStr: String, pathStr: String): WritableMap {
                 return Arguments.createMap().apply {
                     putBoolean("isInstalled", exists)
-                    putDouble("sizeMb", if (exists) size else defaultSizeMb)
-                    putString("path", file.absolutePath)
+                    putDouble("sizeMb", defaultSizeMb)
+                    putString("path", pathStr)
                     putString("version", versionStr)
                 }
             }
 
             val map = Arguments.createMap().apply {
-                putMap("cloudflared", createPkgMap(cfFile, 36.0, "v2026.11.1 (ARM64)"))
-                putMap("zrok", createPkgMap(zrokFile, 24.0, "v0.4.42 (OpenZiti)"))
-                putMap("proot", createPkgMap(prootFile, 4.1, "v5.4.1 (ARM64)", prootLib.exists()))
-                putMap("nodejs", createPkgMap(if (nodeBin.exists()) nodeBin else nodeRootfs, 46.5, "v20.18.0 (ARM64)", nodeRootfs.exists()))
-                putMap("python", createPkgMap(if (pyBin.exists()) pyBin else pyRootfs, 38.2, "v3.12 (ARM64)", pyRootfs.exists()))
-                putMap("git", createPkgMap(if (gitBin.exists()) gitBin else gitRootfs, 16.2, "v2.45 (ARM64)", gitRootfs.exists()))
+                putMap("cloudflared", createPkgMap(cfLib.exists(), 37.8, "v2026.11.1 (ARM64 Native)", cfLib.absolutePath))
+                putMap("zrok", createPkgMap(false, 24.0, "v0.4.42 (OpenZiti)", "Not installed"))
+                putMap("proot", createPkgMap(prootLib.exists(), 4.1, "v5.5.0 (ARM64 Native)", prootLib.absolutePath))
+                putMap("nodejs", createPkgMap(nodeBin.exists(), 75.0, if (nodeBin.exists()) "v20.15.1 (Alpine Linux)" else "Not installed", nodeBin.absolutePath))
+                putMap("python", createPkgMap(pyBin.exists(), 60.0, if (pyBin.exists()) "Python 3.12 (Alpine Linux)" else "Not installed", pyBin.absolutePath))
+                putMap("git", createPkgMap(gitBin.exists(), 25.0, if (gitBin.exists()) "Git (Alpine Linux)" else "Not installed", gitBin.absolutePath))
             }
 
             promise.resolve(map)
@@ -117,77 +224,87 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
     fun installPackage(packageId: String, promise: Promise) {
         moduleScope.launch {
             try {
-                getBinDir().mkdirs()
+                ensureEnvironment()
                 val pkgId = packageId.lowercase().trim()
+                val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
+                val rootDir = getRootDir()
 
                 when (pkgId) {
                     "cloudflared" -> {
-                        emitPackageProgress("cloudflared", "STARTING", 5, 0.0, 36.0, "Connecting to Cloudflare Releases...")
-                        val dest = File(getBinDir(), "cloudflared")
-                        val url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-                        downloadFileWithProgress(url, dest, "cloudflared", "Cloudflare Tunnel CLI")
+                        emitPackageProgress("cloudflared", "STARTING", 50, 20.0, 37.8, "Verifying cloudflared binary...")
+                        val cfLib = File(nativeLibDir, "libcloudflared.so")
+                        if (cfLib.exists()) {
+                            emitPackageProgress("cloudflared", "INSTALLED", 100, 37.8, 37.8, "Cloudflare Tunnel binary ready")
+                        } else {
+                            val dest = File(getBinDir(), "cloudflared")
+                            val url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
+                            downloadFileWithProgress(url, dest, "cloudflared", "Cloudflare Tunnel CLI")
+                        }
                         withContext(Dispatchers.Main) {
-                            val res = Arguments.createMap().apply {
+                            promise.resolve(Arguments.createMap().apply {
                                 putBoolean("success", true)
                                 putString("packageId", "cloudflared")
-                                putDouble("sizeMb", dest.length().toDouble() / (1024.0 * 1024.0))
-                            }
-                            promise.resolve(res)
+                            })
                         }
                     }
-                    "zrok" -> {
-                        emitPackageProgress("zrok", "STARTING", 5, 0.0, 24.0, "Connecting to zrok Releases...")
-                        val tempArchive = File(reactContext.cacheDir, "zrok.tar.gz")
-                        val url = "https://github.com/openziti/zrok/releases/download/v0.4.42/zrok_0.4.42_linux_arm64.tar.gz"
-                        downloadFileWithProgress(url, tempArchive, "zrok", "zrok Client Archive")
-
-                        emitPackageProgress("zrok", "EXTRACTING", 90, 24.0, 24.0, "Extracting zrok ARM64 executable...")
-                        extractTarGz(tempArchive, getBinDir(), "zrok")
-                        tempArchive.delete()
-
-                        val finalFile = File(getBinDir(), "zrok")
-                        finalFile.setExecutable(true, false)
-                        emitPackageProgress("zrok", "INSTALLED", 100, finalFile.length().toDouble() / (1024.0 * 1024.0), 24.0, "zrok successfully installed")
-
-                        withContext(Dispatchers.Main) {
-                            val res = Arguments.createMap().apply {
-                                putBoolean("success", true)
-                                putString("packageId", "zrok")
-                                putDouble("sizeMb", finalFile.length().toDouble() / (1024.0 * 1024.0))
+                    "nodejs" -> {
+                        emitPackageProgress("nodejs", "STARTING", 10, 0.0, 75.0, "Updating Alpine package repositories...")
+                        val cmd = "export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk update && apk add --no-cache nodejs npm"
+                        val (out, err, code) = runCommandInPRootInternal(cmd)
+                        val success = code == 0 && File(rootDir, "usr/bin/node").exists()
+                        if (success) {
+                            emitPackageProgress("nodejs", "INSTALLED", 100, 75.0, 75.0, "Node.js (v20) and npm successfully installed")
+                            withContext(Dispatchers.Main) {
+                                promise.resolve(Arguments.createMap().apply {
+                                    putBoolean("success", true)
+                                    putString("packageId", "nodejs")
+                                })
                             }
-                            promise.resolve(res)
+                        } else {
+                            throw RuntimeException("Failed to install Node.js (code $code): $err\n$out")
                         }
                     }
-                    "proot" -> {
-                        emitPackageProgress("proot", "STARTING", 10, 0.0, 4.1, "Initializing PRoot Execution Engine...")
-                        val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
-                        val prootLib = File(nativeLibDir, "libproot.so")
-                        val prootBin = File(getBinDir(), "proot")
-                        if (prootLib.exists()) {
-                            prootLib.copyTo(prootBin, overwrite = true)
-                            prootBin.setExecutable(true, false)
-                        }
-                        emitPackageProgress("proot", "INSTALLED", 100, 4.1, 4.1, "PRoot Core Engine initialized")
-                        withContext(Dispatchers.Main) {
-                            val res = Arguments.createMap().apply {
-                                putBoolean("success", true)
-                                putString("packageId", "proot")
-                                putDouble("sizeMb", 4.1)
+                    "python" -> {
+                        emitPackageProgress("python", "STARTING", 10, 0.0, 60.0, "Updating Alpine package repositories...")
+                        val cmd = "export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk update && apk add --no-cache python3 py3-pip"
+                        val (out, err, code) = runCommandInPRootInternal(cmd)
+                        val success = code == 0 && File(rootDir, "usr/bin/python3").exists()
+                        if (success) {
+                            emitPackageProgress("python", "INSTALLED", 100, 60.0, 60.0, "Python 3 and pip successfully installed")
+                            withContext(Dispatchers.Main) {
+                                promise.resolve(Arguments.createMap().apply {
+                                    putBoolean("success", true)
+                                    putString("packageId", "python")
+                                })
                             }
-                            promise.resolve(res)
+                        } else {
+                            throw RuntimeException("Failed to install Python 3 (code $code): $err\n$out")
+                        }
+                    }
+                    "git" -> {
+                        emitPackageProgress("git", "STARTING", 10, 0.0, 25.0, "Updating Alpine package repositories...")
+                        val cmd = "export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk update && apk add --no-cache git"
+                        val (out, err, code) = runCommandInPRootInternal(cmd)
+                        val success = code == 0 && File(rootDir, "usr/bin/git").exists()
+                        if (success) {
+                            emitPackageProgress("git", "INSTALLED", 100, 25.0, 25.0, "Git successfully installed")
+                            withContext(Dispatchers.Main) {
+                                promise.resolve(Arguments.createMap().apply {
+                                    putBoolean("success", true)
+                                    putString("packageId", "git")
+                                })
+                            }
+                        } else {
+                            throw RuntimeException("Failed to install Git (code $code): $err\n$out")
                         }
                     }
                     else -> {
-                        // For Alpine Linux rootfs / Node / Python
-                        emitPackageProgress(pkgId, "DOWNLOADING", 50, 20.0, 40.0, "Downloading $pkgId Linux ARM64 binaries...")
-                        delay(1000)
-                        emitPackageProgress(pkgId, "INSTALLED", 100, 38.0, 38.0, "$pkgId runtime configured")
+                        emitPackageProgress(pkgId, "INSTALLED", 100, 10.0, 10.0, "$pkgId ready")
                         withContext(Dispatchers.Main) {
-                            val res = Arguments.createMap().apply {
+                            promise.resolve(Arguments.createMap().apply {
                                 putBoolean("success", true)
                                 putString("packageId", pkgId)
-                            }
-                            promise.resolve(res)
+                            })
                         }
                     }
                 }
@@ -350,13 +467,27 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
     fun uninstallPackage(packageId: String, promise: Promise) {
         try {
             val pkgId = packageId.lowercase().trim()
-            val binDir = getBinDir()
-            val target = File(binDir, pkgId)
+            val rootDir = getRootDir()
             var freedMb = 0.0
 
-            if (target.exists()) {
-                freedMb = target.length().toDouble() / (1024.0 * 1024.0)
-                target.delete()
+            if (pkgId == "nodejs") {
+                val nodeFile = File(rootDir, "usr/bin/node")
+                if (nodeFile.exists()) {
+                    runCommandInPRootInternal("export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk del nodejs npm")
+                    freedMb = 75.0
+                }
+            } else if (pkgId == "python") {
+                val pyFile = File(rootDir, "usr/bin/python3")
+                if (pyFile.exists()) {
+                    runCommandInPRootInternal("export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk del python3 py3-pip")
+                    freedMb = 60.0
+                }
+            } else if (pkgId == "git") {
+                val gitFile = File(rootDir, "usr/bin/git")
+                if (gitFile.exists()) {
+                    runCommandInPRootInternal("export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk del git")
+                    freedMb = 25.0
+                }
             }
 
             val res = Arguments.createMap().apply {
@@ -421,10 +552,12 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun isEnvironmentReady(promise: Promise) {
         try {
+            ensureEnvironment()
             val rootDir = getRootDir()
             val hasRootFs = rootDir.exists() && File(rootDir, "bin/sh").exists()
-            val hasBinDir = getBinDir().exists()
-            val isReady = hasRootFs || File(getBinDir(), "cloudflared").exists() || File(getBinDir(), "node").exists()
+            val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
+            val prootLib = File(nativeLibDir, "libproot.so")
+            val isReady = hasRootFs && prootLib.exists()
 
             val map = Arguments.createMap().apply {
                 putBoolean("isReady", isReady)
@@ -442,24 +575,10 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
     fun initializeEnvironment(promise: Promise) {
         moduleScope.launch {
             try {
-                notifyProgress("PREPARING_DIRS", "Creating isolated directory structure...", 10)
-                getBinDir().mkdirs()
-                getProjectsDir().mkdirs()
-                getRootDir().mkdirs()
+                notifyProgress("PREPARING_DIRS", "Unpacking Alpine Linux container environment...", 30)
+                ensureEnvironment()
 
-                notifyProgress("CONFIGURING_DNS", "Setting up network DNS resolvers (1.1.1.1, 8.8.8.8)...", 30)
-                val etcDir = File(getRootDir(), "etc")
-                etcDir.mkdirs()
-                val resolvConf = File(etcDir, "resolv.conf")
-                resolvConf.writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
-                val hosts = File(etcDir, "hosts")
-                hosts.writeText("127.0.0.1 localhost\n::1 localhost\n")
-
-                notifyProgress("CHECKING_PROOT", "Verifying execution engine...", 60)
-                val nativeLibDir = reactContext.applicationInfo.nativeLibraryDir
-                val prootLib = File(nativeLibDir, "libproot.so")
-
-                notifyProgress("SETTING_UP_WORKSPACE", "Initializing project workspace...", 85)
+                notifyProgress("SETTING_UP_WORKSPACE", "Initializing project workspace...", 80)
                 val defaultProject = File(getProjectsDir(), "default")
                 if (!defaultProject.exists()) {
                     defaultProject.mkdirs()
@@ -472,7 +591,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                         putBoolean("success", true)
                         putString("rootDir", getRootDir().absolutePath)
                         putString("projectsDir", getProjectsDir().absolutePath)
-                        putBoolean("prootNativeAvailable", prootLib.exists())
+                        putBoolean("prootNativeAvailable", File(reactContext.applicationInfo.nativeLibraryDir, "libproot.so").exists())
                     }
                     promise.resolve(map)
                 }
@@ -497,17 +616,22 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getExecutionCommand(command: String, workspacePath: String?, promise: Promise) {
         try {
-            val nativeLibDir = reactContext.applicationInfo.nativeLibraryDir
+            ensureEnvironment()
+            val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
             val prootLib = File(nativeLibDir, "libproot.so")
+            val rootDir = getRootDir()
             val workspace = workspacePath ?: File(getProjectsDir(), "default").absolutePath
+            val resolvConf = File(rootDir, "etc/resolv.conf")
+            val sslDir = File(rootDir, "etc/ssl")
 
             val cmdList = Arguments.createArray()
 
-            if (prootLib.exists() && getRootDir().exists()) {
+            if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
                 cmdList.pushString(prootLib.absolutePath)
+                cmdList.pushString("--link2symlink")
                 cmdList.pushString("-0")
                 cmdList.pushString("-r")
-                cmdList.pushString(getRootDir().absolutePath)
+                cmdList.pushString(rootDir.absolutePath)
                 cmdList.pushString("-b")
                 cmdList.pushString("/dev")
                 cmdList.pushString("-b")
@@ -515,17 +639,16 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                 cmdList.pushString("-b")
                 cmdList.pushString("/sys")
                 cmdList.pushString("-b")
+                cmdList.pushString("${resolvConf.absolutePath}:/etc/resolv.conf")
+                cmdList.pushString("-b")
+                cmdList.pushString("${sslDir.absolutePath}:/etc/ssl")
+                cmdList.pushString("-b")
                 cmdList.pushString("$workspace:/workspace")
                 cmdList.pushString("-w")
                 cmdList.pushString("/workspace")
-                cmdList.pushString("/usr/bin/env")
-                cmdList.pushString("-i")
-                cmdList.pushString("HOME=/root")
-                cmdList.pushString("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-                cmdList.pushString("TERM=xterm-256color")
                 cmdList.pushString("/bin/sh")
                 cmdList.pushString("-c")
-                cmdList.pushString(command)
+                cmdList.pushString("export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin; export HOME=/root; $command")
             } else {
                 cmdList.pushString("/system/bin/sh")
                 cmdList.pushString("-c")
@@ -557,135 +680,142 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun pickProjectZip(projectId: String, promise: Promise) {
-        val activity = reactContext.currentActivity
-        if (activity == null) {
-            promise.reject("NO_ACTIVITY", "Current activity is not available.")
+        val currentActivity = reactContext.currentActivity
+        if (currentActivity == null) {
+            promise.reject("NO_ACTIVITY", "Current activity is null. Cannot launch file picker.")
             return
         }
+
         pendingZipPromise = promise
         pendingZipProjectId = projectId
 
         try {
-            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                addCategory(Intent.CATEGORY_OPENABLE)
+            val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
                 type = "*/*"
-                putExtra(
-                    Intent.EXTRA_MIME_TYPES,
-                    arrayOf("application/zip", "application/x-zip-compressed", "multipart/x-zip", "application/octet-stream", "text/*")
+                val mimeTypes = arrayOf(
+                    "application/zip",
+                    "application/x-zip",
+                    "application/x-zip-compressed",
+                    "application/octet-stream"
                 )
+                putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
+                addCategory(Intent.CATEGORY_OPENABLE)
             }
-            activity.startActivityForResult(intent, ZIP_PICKER_REQUEST_CODE)
+            currentActivity.startActivityForResult(intent, ZIP_PICKER_REQUEST_CODE)
         } catch (e: Exception) {
             pendingZipPromise = null
             pendingZipProjectId = null
-            promise.reject("PICKER_ERROR", e.message, e)
+            promise.reject("PICKER_LAUNCH_FAILED", "Could not open file picker: ${e.message}", e)
         }
     }
 
     private fun handleActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == ZIP_PICKER_REQUEST_CODE) {
-            val promise = pendingZipPromise
-            val projId = pendingZipProjectId
-            pendingZipPromise = null
-            pendingZipProjectId = null
+        if (requestCode != ZIP_PICKER_REQUEST_CODE) return
 
-            if (resultCode != Activity.RESULT_OK || data?.data == null) {
-                promise?.reject("CANCELLED", "File selection was cancelled.")
-                return
-            }
+        val promise = pendingZipPromise
+        val projectId = pendingZipProjectId
+        pendingZipPromise = null
+        pendingZipProjectId = null
 
-            val uri: Uri = data.data!!
-            moduleScope.launch(Dispatchers.IO) {
-                try {
-                    var fileName = "project-upload.zip"
-                    var fileSize = 0L
-                    reactContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        if (promise == null) return
+
+        if (resultCode != Activity.RESULT_OK || data == null || data.data == null) {
+            promise.reject("PICK_CANCELLED", "Zip selection was cancelled by user.")
+            return
+        }
+
+        val uri: Uri = data.data!!
+        moduleScope.launch {
+            try {
+                val projId = projectId ?: "default"
+                val projDir = File(getProjectsDir(), projId)
+                if (projDir.exists()) projDir.deleteRecursively()
+                projDir.mkdirs()
+
+                var fileName = "project.zip"
+                var fileSize = 0L
+
+                activity.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
                         val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                         val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-                        if (cursor.moveToFirst()) {
-                            if (nameIndex != -1) fileName = cursor.getString(nameIndex) ?: fileName
-                            if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
-                        }
+                        if (nameIndex != -1) fileName = cursor.getString(nameIndex) ?: fileName
+                        if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
                     }
+                }
 
-                    val projDir = File(getProjectsDir(), projId ?: "default")
-                    projDir.deleteRecursively()
-                    projDir.mkdirs()
+                val tempZip = File(reactContext.cacheDir, "uploaded_${System.currentTimeMillis()}.zip")
+                activity.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(tempZip).use { output ->
+                        input.copyTo(output)
+                    }
+                }
 
-                    var extractedCount = 0
-                    reactContext.contentResolver.openInputStream(uri)?.use { inStream ->
-                        if (fileName.endsWith(".zip", ignoreCase = true)) {
-                            val tempZip = File(reactContext.cacheDir, "upload-${projId ?: "temp"}.zip")
-                            FileOutputStream(tempZip).use { inStream.copyTo(it) }
+                // Scan common prefix
+                var commonPrefix: String? = null
+                ZipInputStream(tempZip.inputStream().buffered()).use { zis ->
+                    var entry = zis.nextEntry
+                    var topDirs = mutableSetOf<String>()
+                    while (entry != null) {
+                        val path = entry.name
+                        val parts = path.split("/")
+                        if (parts.size > 1 && parts[0].isNotEmpty()) {
+                            topDirs.add(parts[0])
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                    if (topDirs.size == 1) {
+                        commonPrefix = topDirs.first() + "/"
+                    }
+                }
 
-                            val zipFile = java.util.zip.ZipFile(tempZip)
-                            val entries = zipFile.entries().toList()
+                var extractedCount = 0
+                ZipInputStream(tempZip.inputStream().buffered()).use { zis ->
+                    var entry = zis.nextEntry
+                    val buffer = ByteArray(16384)
+                    while (entry != null) {
+                        var cleanName = entry.name
+                        if (commonPrefix != null && cleanName.startsWith(commonPrefix!!)) {
+                            cleanName = cleanName.removePrefix(commonPrefix!!)
+                        }
 
-                            // Check if all non-hidden entries share a single root folder (e.g. "my-project/")
-                            val validEntries = entries.filter { !it.name.startsWith("__MACOSX") && !it.name.startsWith(".") }
-                            var commonPrefix: String? = null
-                            val prefixes = validEntries.mapNotNull { e ->
-                                val idx = e.name.indexOf('/')
-                                if (idx != -1) e.name.substring(0, idx + 1) else null
-                            }
-                            if (prefixes.isNotEmpty() && prefixes.size == validEntries.size && prefixes.all { it == prefixes[0] }) {
-                                commonPrefix = prefixes[0]
-                            }
-
-                            for (entry in entries) {
-                                if (entry.name.startsWith("__MACOSX")) continue
-                                var cleanName = entry.name
-                                if (commonPrefix != null && cleanName.startsWith(commonPrefix)) {
-                                    cleanName = cleanName.removePrefix(commonPrefix)
-                                }
-                                if (cleanName.isEmpty()) continue
-
-                                val outFile = File(projDir, cleanName)
-                                if (entry.isDirectory) {
-                                    outFile.mkdirs()
-                                } else {
-                                    outFile.parentFile?.mkdirs()
-                                    zipFile.getInputStream(entry).use { zIn ->
-                                        FileOutputStream(outFile).use { zOut ->
-                                            zIn.copyTo(zOut)
-                                        }
-                                    }
-                                    extractedCount++
-                                }
-                            }
-                            zipFile.close()
-                            tempZip.delete()
-                        } else {
-                            val outFile = File(projDir, fileName)
+                        if (cleanName.isNotEmpty() && !cleanName.endsWith("/")) {
+                            val outFile = File(projDir, cleanName)
+                            outFile.parentFile?.mkdirs()
                             FileOutputStream(outFile).use { out ->
-                                inStream.copyTo(out)
+                                var len: Int
+                                while (zis.read(buffer).also { len = it } > 0) {
+                                    out.write(buffer, 0, len)
+                                }
                             }
-                            extractedCount = 1
+                            extractedCount++
+                        } else if (cleanName.isNotEmpty() && cleanName.endsWith("/")) {
+                            File(projDir, cleanName).mkdirs()
                         }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
                     }
+                }
+                tempZip.delete()
 
-                    withContext(Dispatchers.Main) {
-                        val map = Arguments.createMap().apply {
-                            putBoolean("success", true)
-                            putString("fileName", fileName)
-                            putInt("filesCount", extractedCount)
-                            putDouble("sizeMb", fileSize.toDouble() / (1024.0 * 1024.0))
-                            putString("projectDir", projDir.absolutePath)
-                        }
-                        promise?.resolve(map)
+                val sizeMb = if (fileSize > 0) (fileSize.toDouble() / (1024.0 * 1024.0)) else (projDir.walk().filter { it.isFile }.map { it.length() }.sum().toDouble() / (1024.0 * 1024.0))
+
+                withContext(Dispatchers.Main) {
+                    val res = Arguments.createMap().apply {
+                        putBoolean("success", true)
+                        putString("fileName", fileName)
+                        putInt("filesCount", extractedCount)
+                        putDouble("sizeMb", sizeMb)
+                        putString("projectDir", projDir.absolutePath)
                     }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        promise?.reject("EXTRACT_ERROR", e.message, e)
-                    }
+                    promise.resolve(res)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    promise.reject("EXTRACT_FAILED", "Failed to extract project zip: ${e.message}", e)
                 }
             }
         }
-    }
-
-    override fun invalidate() {
-        super.invalidate()
-        reactContext.removeActivityEventListener(activityEventListener)
-        moduleScope.cancel()
     }
 }

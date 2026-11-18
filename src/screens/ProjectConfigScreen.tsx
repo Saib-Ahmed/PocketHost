@@ -13,7 +13,7 @@ import { colors } from '../theme/colors';
 import { useApp } from '../store/AppContext';
 import { Card } from '../components/Card';
 import { Button } from '../components/Button';
-import { ProjectSourceType, PublicUrlType } from '../types/project';
+import { ProjectItem, ProjectSourceType, PublicUrlType } from '../types/project';
 import { SUPPORTED_STACKS } from '../types/stack';
 import { IconTrash, IconClose, IconCheck, IconGit } from '../components/Icons';
 import { SoftwareManagerScreen } from './SoftwareManagerScreen';
@@ -225,7 +225,7 @@ export const ProjectConfigScreen: React.FC<ProjectConfigScreenProps> = ({
         <ScrollView style={styles.scrollArea} contentContainerStyle={styles.content}>
           <Card style={styles.card}>
             <Text style={styles.cardTitle}>No Projects Created Yet</Text>
-            <Text style={[styles.helpText, { marginTop: 8 }]}>
+            <Text style={[styles.fieldHint, { marginTop: 8 }]}>
               There are no active projects to configure. Go to the Dashboard or Stacks tab to create your first mobile-hosted backend or frontend service.
             </Text>
           </Card>
@@ -1094,6 +1094,11 @@ const styles = StyleSheet.create({
   bottomControls: {
     marginTop: 10,
     gap: 12,
+  },
+  fieldHint: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 18,
   },
   deleteProjectBtn: {
     flexDirection: 'row',

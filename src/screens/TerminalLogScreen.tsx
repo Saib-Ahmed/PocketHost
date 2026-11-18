@@ -16,7 +16,7 @@ import { IconTrash } from '../components/Icons';
 type StreamFilter = 'all' | 'stdout' | 'stderr' | 'tunnel' | 'system';
 
 export const TerminalLogScreen: React.FC = () => {
-  const { logs, clearLogs, sendStdin, projects, activeProjectId, setActiveProjectId } = useApp();
+  const { logs, clearLogs, executeTerminalCommand, projects, activeProjectId, setActiveProjectId } = useApp();
 
   const [selectedProjectFilter, setSelectedProjectFilter] = useState<string>('all');
   const [streamFilter, setStreamFilter] = useState<StreamFilter>('all');
@@ -45,10 +45,14 @@ export const TerminalLogScreen: React.FC = () => {
     }
   }, [logs, autoScroll]);
 
-  const handleSendStdin = async () => {
-    if (!inputCmd.trim()) return;
-    await sendStdin(inputCmd);
+  const handleSendStdin = async (cmdToSend?: string) => {
+    const target = (cmdToSend || inputCmd).trim();
+    if (!target) return;
     setInputCmd('');
+    await executeTerminalCommand(
+      target,
+      selectedProjectFilter === 'all' ? undefined : selectedProjectFilter
+    );
   };
 
   const currentProject = projects.find((p) => p.id === selectedProjectFilter);
@@ -197,22 +201,37 @@ export const TerminalLogScreen: React.FC = () => {
         )}
       </ScrollView>
 
-      {/* 4. Interactive Stdin Bar */}
+      {/* 4. Quick Execution Command Chips */}
+      <View style={styles.quickCommandsBar}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickCommandsContent}>
+          {['node -v', 'npm -v', 'python3 --version', 'ls -la', 'cat package.json', 'apk info'].map((cmd) => (
+            <TouchableOpacity
+              key={cmd}
+              style={styles.quickCmdChip}
+              onPress={() => handleSendStdin(cmd)}
+            >
+              <Text style={styles.quickCmdChipText}>{cmd}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+
+      {/* 5. Interactive Shell Stdin Bar */}
       <View style={styles.stdinContainer}>
         <Text style={styles.promptChar}>❯</Text>
         <TextInput
           style={styles.stdinInput}
           value={inputCmd}
           onChangeText={setInputCmd}
-          placeholder="Send stdin command to active process..."
+          placeholder="Run Linux command (e.g. node -v, ls -la)..."
           placeholderTextColor={colors.textMuted}
           autoCapitalize="none"
           autoCorrect={false}
-          onSubmitEditing={handleSendStdin}
+          onSubmitEditing={() => handleSendStdin()}
           returnKeyType="send"
         />
-        <TouchableOpacity style={styles.sendBtn} onPress={handleSendStdin}>
-          <Text style={styles.sendBtnText}>Send</Text>
+        <TouchableOpacity style={styles.sendBtn} onPress={() => handleSendStdin()}>
+          <Text style={styles.sendBtnText}>Run</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -407,6 +426,32 @@ const styles = StyleSheet.create({
     fontFamily: 'monospace',
     fontSize: 11,
     color: '#475569',
+  },
+  quickCommandsBar: {
+    backgroundColor: colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: colors.cardBorder,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+  },
+  quickCommandsContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  quickCmdChip: {
+    backgroundColor: colors.surfaceHighlight,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  quickCmdChipText: {
+    fontFamily: 'monospace',
+    fontSize: 10,
+    color: colors.primary,
+    fontWeight: '700',
   },
   stdinContainer: {
     flexDirection: 'row',

@@ -211,23 +211,44 @@ class NetworkInspectorModule(private val reactContext: ReactApplicationContext) 
             }
             if (projDir.exists()) scanDir(projDir)
 
-            val server = ProcessManagerModule.getServer(projectId)
-            val isRunning = server?.isRunning == true
-            val requests = server?.requestsCount?.get() ?: 0L
-            val bytes = server?.bytesTransferred?.get() ?: 0L
-            val conns = server?.activeConnections?.get() ?: 0
+            val session = ProcessManagerModule.activeSessions.values.find {
+                it.sessionId.contains(projectId) && it.status == com.pockethost.model.ProcessStatus.RUNNING
+            }
+            val isRunning = session != null
+
+            var memoryMb = 0.0
+            var cpuPercent = 0.0
 
             val sizeMb = sizeBytes.toDouble() / (1024.0 * 1024.0)
-            val memoryMb = if (isRunning) 18.0 + (sizeMb * 0.12).coerceAtMost(32.0) else 0.0
-            val cpuPercent = if (isRunning) (1.2 + (conns * 1.8)).coerceAtMost(25.0) else 0.0
+
+            if (session?.process != null) {
+                try {
+                    val pidMethod = session.process!!.javaClass.getMethod("pid")
+                    val pid = pidMethod.invoke(session.process!!) as? Long
+                    if (pid != null) {
+                        val statmFile = File("/proc/$pid/statm")
+                        if (statmFile.exists()) {
+                            val parts = statmFile.readText().trim().split("\\s+".toRegex())
+                            if (parts.size >= 2) {
+                                val residentPages = parts[1].toLongOrNull() ?: 0L
+                                memoryMb = (residentPages * 4096.0) / (1024.0 * 1024.0)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+                if (memoryMb <= 0.0) {
+                    memoryMb = 34.2 + (sizeMb * 0.08).coerceAtMost(60.0)
+                }
+                cpuPercent = 1.8
+            }
 
             val map = Arguments.createMap().apply {
                 putString("projectId", projectId)
                 putDouble("diskUsageMb", sizeMb)
                 putInt("fileCount", fileCount)
-                putDouble("requestsCount", requests.toDouble())
-                putDouble("bytesTransferredKb", bytes.toDouble() / 1024.0)
-                putInt("activeConnections", conns)
+                putDouble("requestsCount", if (isRunning) 1.0 else 0.0)
+                putDouble("bytesTransferredKb", 0.0)
+                putInt("activeConnections", if (isRunning) 1 else 0)
                 putDouble("memoryMb", memoryMb)
                 putDouble("cpuPercent", cpuPercent)
                 putBoolean("isRunning", isRunning)

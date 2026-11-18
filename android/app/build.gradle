@@ -50,6 +50,7 @@ android {
 
     packaging {
         jniLibs {
+            useLegacyPackaging = true
             pickFirsts.add("**/libc++_shared.so")
             pickFirsts.add("**/libfbjni.so")
         }

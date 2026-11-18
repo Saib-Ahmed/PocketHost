@@ -5,10 +5,7 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
 import java.io.BufferedReader
 import java.io.File
-import java.io.FileOutputStream
 import java.io.InputStreamReader
-import java.net.HttpURLConnection
-import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
@@ -41,49 +38,27 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    private suspend fun ensureBinary(binaryFile: File, tunnelKey: String): Boolean {
-        if (binaryFile.exists() && binaryFile.length() > 5000000L) {
-            binaryFile.setExecutable(true, false)
-            return true
+    private fun getRootDir(): File = File(reactContext.filesDir, "rootfs")
+
+    private fun ensureDnsAndSsl(rootDir: File) {
+        val etcDir = File(rootDir, "etc")
+        etcDir.mkdirs()
+        val resolvConf = File(etcDir, "resolv.conf")
+        if (!resolvConf.exists() || resolvConf.length() < 10) {
+            resolvConf.writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n")
         }
-
-        if (tunnelKey != "cloudflare") return false
-
-        return withContext(Dispatchers.IO) {
+        val sslDir = File(etcDir, "ssl")
+        val certsDir = File(sslDir, "certs")
+        certsDir.mkdirs()
+        val certFile = File(certsDir, "ca-certificates.crt")
+        if (!certFile.exists() || certFile.length() < 1000) {
             try {
-                binaryFile.parentFile?.mkdirs()
-                val urlStr = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-                var currentUrl = urlStr
-                var conn: HttpURLConnection
-                var redirectCount = 0
-                while (true) {
-                    conn = URL(currentUrl).openConnection() as HttpURLConnection
-                    conn.instanceFollowRedirects = true
-                    conn.connectTimeout = 15000
-                    conn.readTimeout = 30000
-                    val code = conn.responseCode
-                    if ((code in 301..308) && redirectCount < 6) {
-                        currentUrl = conn.getHeaderField("Location") ?: break
-                        conn.disconnect()
-                        redirectCount++
-                        continue
-                    }
-                    break
+                reactContext.assets.open("ca-certificates.crt").use { input ->
+                    val bytes = input.readBytes()
+                    File(sslDir, "cert.pem").writeBytes(bytes)
+                    certFile.writeBytes(bytes)
                 }
-                val temp = File(binaryFile.parentFile, "${binaryFile.name}.tmp")
-                conn.inputStream.use { input ->
-                    FileOutputStream(temp).use { output ->
-                        input.copyTo(output)
-                    }
-                }
-                if (binaryFile.exists()) binaryFile.delete()
-                temp.renameTo(binaryFile)
-                binaryFile.setExecutable(true, false)
-                binaryFile.setReadable(true, false)
-                binaryFile.exists() && binaryFile.length() > 5000000L
-            } catch (_: Exception) {
-                false
-            }
+            } catch (_: Exception) {}
         }
     }
 
@@ -106,13 +81,19 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
             try {
                 emitTunnelStatus(tunnelKey, "CONNECTING", null)
 
-                val binDir = File(reactContext.filesDir, "bin")
-                val binaryName = if (tunnelKey == "zrok") "zrok" else "cloudflared"
-                val binaryFile = File(binDir, binaryName)
+                val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
+                val prootLib = File(nativeLibDir, "libproot.so")
+                val loaderLib = File(nativeLibDir, "libloader.so")
+                val cfLib = File(nativeLibDir, "libcloudflared.so")
+                val rootDir = getRootDir()
+                ensureDnsAndSsl(rootDir)
 
-                val hasBinary = ensureBinary(binaryFile, tunnelKey)
-                if (!hasBinary) {
-                    val errorMsg = "${binaryName.capitalize()} binary is not available. Please install it from Packages & Storage."
+                val resolvConf = File(rootDir, "etc/resolv.conf")
+                val sslDir = File(rootDir, "etc/ssl")
+                val certFile = File(sslDir, "certs/ca-certificates.crt")
+
+                if (tunnelKey == "cloudflare" && !cfLib.exists()) {
+                    val errorMsg = "libcloudflared.so not found in native library directory."
                     emitTunnelStatus(tunnelKey, "ERROR", null)
                     withContext(Dispatchers.Main) {
                         promise.reject("BINARY_MISSING", errorMsg)
@@ -121,18 +102,39 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 }
 
                 val command = mutableListOf<String>()
-                if (tunnelKey == "zrok") {
-                    command.addAll(listOf(binaryFile.absolutePath, "share", "public", "http://127.0.0.1:$port"))
+                if (prootLib.exists()) {
+                    command.addAll(listOf(
+                        prootLib.absolutePath,
+                        "--link2symlink",
+                        "-0",
+                        "-r", rootDir.absolutePath,
+                        "-b", "/dev",
+                        "-b", "/proc",
+                        "-b", "/sys",
+                        "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
+                        "-b", "${sslDir.absolutePath}:/etc/ssl",
+                        "-b", "${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt",
+                        cfLib.absolutePath,
+                        "tunnel",
+                        "--url", "http://127.0.0.1:$port",
+                        "--no-autoupdate"
+                    ))
                 } else {
-                    command.addAll(listOf(binaryFile.absolutePath, "tunnel", "--url", "http://127.0.0.1:$port", "--no-autoupdate"))
+                    command.addAll(listOf(cfLib.absolutePath, "tunnel", "--url", "http://127.0.0.1:$port", "--no-autoupdate"))
                 }
 
                 val processBuilder = ProcessBuilder(command)
                 processBuilder.directory(reactContext.filesDir)
                 val env = processBuilder.environment()
+                env["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
+                if (loaderLib.exists()) {
+                    env["PROOT_LOADER"] = loaderLib.absolutePath
+                }
+                env["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
                 env["HOME"] = reactContext.filesDir.absolutePath
                 env["TMPDIR"] = reactContext.cacheDir.absolutePath
                 processBuilder.redirectErrorStream(true)
+
                 val process = processBuilder.start()
 
                 val instance = TunnelInstance(
@@ -151,7 +153,7 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                         var line: String? = null
                         while (isActive && reader.readLine().also { line = it } != null) {
                             val currentLine = line ?: continue
-                            android.util.Log.d("TunnelCLI", currentLine)
+                            android.util.Log.d("CloudflareTunnel", currentLine)
                             val pattern = if (tunnelKey == "zrok") zrokUrlPattern else cloudflareUrlPattern
                             val matcher = pattern.matcher(currentLine)
                             if (matcher.find()) {
@@ -169,23 +171,30 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 }
                 instance.readerJob = readerJob
 
-                // Wait up to 8.5 seconds for tunnel URL to be established
+                // Wait up to 15 seconds for tunnel URL to be established
                 val publicUrl = try {
-                    withTimeout(8500) {
+                    withTimeout(15000) {
                         urlDeferred.await()
                     }
                 } catch (_: Exception) {
                     null
                 }
 
-                withContext(Dispatchers.Main) {
-                    val map = Arguments.createMap().apply {
-                        putString("provider", tunnelKey)
-                        putInt("port", port)
-                        putString("url", publicUrl)
-                        putString("status", if (publicUrl != null) "CONNECTED" else "CONNECTING")
+                if (publicUrl != null) {
+                    withContext(Dispatchers.Main) {
+                        val map = Arguments.createMap().apply {
+                            putString("provider", tunnelKey)
+                            putInt("port", port)
+                            putString("url", publicUrl)
+                            putString("status", "CONNECTED")
+                        }
+                        promise.resolve(map)
                     }
-                    promise.resolve(map)
+                } else {
+                    emitTunnelStatus(tunnelKey, "ERROR", null)
+                    withContext(Dispatchers.Main) {
+                        promise.reject("TUNNEL_TIMEOUT", "Cloudflare tunnel failed to establish public URL within 15 seconds. Please check your device internet connection.")
+                    }
                 }
             } catch (e: Exception) {
                 emitTunnelStatus(tunnelKey, "ERROR", null)

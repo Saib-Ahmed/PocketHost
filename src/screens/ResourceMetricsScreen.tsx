@@ -408,7 +408,7 @@ const styles = StyleSheet.create({
   },
   progressBarBg: {
     height: 4,
-    backgroundColor: colors.border,
+    backgroundColor: colors.cardBorder,
     borderRadius: 2,
     overflow: 'hidden',
     marginBottom: 6,
@@ -515,7 +515,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
     paddingTop: 10,
     borderTopWidth: 1,
-    borderTopColor: colors.border,
+    borderTopColor: colors.cardBorder,
   },
   resourceItem: {
     width: '48%',

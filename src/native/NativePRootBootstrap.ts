@@ -132,6 +132,17 @@ export const NativePRootBootstrap = {
     return ['/system/bin/sh', '-c', command];
   },
 
+  async executeShellCommand(
+    command: string,
+    workspacePath?: string
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const mod = getModule();
+    if (mod?.executeShellCommand) {
+      return mod.executeShellCommand(command, workspacePath);
+    }
+    return { stdout: '', stderr: 'Native PRoot module unavailable', exitCode: 1 };
+  },
+
   async getEnvironmentInfo(): Promise<any> {
     const mod = getModule();
     if (mod) {

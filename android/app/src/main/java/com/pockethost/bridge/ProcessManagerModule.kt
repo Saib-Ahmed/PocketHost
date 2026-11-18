@@ -16,16 +16,46 @@ import java.util.concurrent.ConcurrentHashMap
 class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
-    private val sessions = ConcurrentHashMap<String, ProcessSession>()
     private val moduleScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun getName(): String = "ProcessManagerModule"
+
+    companion object {
+        val activeSessions = ConcurrentHashMap<String, ProcessSession>()
+        fun getSession(sessionId: String): ProcessSession? = activeSessions[sessionId]
+        val embeddedServers = ConcurrentHashMap<String, EmbeddedProjectServer>()
+        fun getServer(projectId: String): EmbeddedProjectServer? = embeddedServers[projectId]
+    }
 
     private fun sendEvent(eventName: String, params: WritableMap) {
         if (reactContext.hasActiveReactInstance()) {
             reactContext
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                 .emit(eventName, params)
+        }
+    }
+
+    private fun getRootDir(): File = File(reactContext.filesDir, "rootfs")
+
+    private fun ensureDnsAndSsl(rootDir: File) {
+        val etcDir = File(rootDir, "etc")
+        etcDir.mkdirs()
+        val resolvConf = File(etcDir, "resolv.conf")
+        if (!resolvConf.exists() || resolvConf.length() < 10) {
+            resolvConf.writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n")
+        }
+        val sslDir = File(etcDir, "ssl")
+        val certsDir = File(sslDir, "certs")
+        certsDir.mkdirs()
+        val certFile = File(certsDir, "ca-certificates.crt")
+        if (!certFile.exists() || certFile.length() < 1000) {
+            try {
+                reactContext.assets.open("ca-certificates.crt").use { input ->
+                    val bytes = input.readBytes()
+                    File(sslDir, "cert.pem").writeBytes(bytes)
+                    certFile.writeBytes(bytes)
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -39,7 +69,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         promise: Promise
     ) {
         try {
-            if (sessions.containsKey(sessionId)) {
+            if (activeSessions.containsKey(sessionId)) {
                 promise.reject("SESSION_EXISTS", "Session with ID $sessionId already exists.")
                 return
             }
@@ -80,7 +110,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
                 env = env
             )
 
-            sessions[sessionId] = session
+            activeSessions[sessionId] = session
             promise.resolve(sessionId)
         } catch (e: Exception) {
             promise.reject("CREATE_ERROR", e.message, e)
@@ -89,7 +119,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun startSession(sessionId: String, promise: Promise) {
-        val session = sessions[sessionId]
+        val session = activeSessions[sessionId]
         if (session == null) {
             promise.reject("NOT_FOUND", "Session $sessionId not found.")
             return
@@ -101,16 +131,50 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         }
 
         try {
-            val processBuilder = ProcessBuilder(session.command)
+            val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
+            val prootLib = File(nativeLibDir, "libproot.so")
+            val loaderLib = File(nativeLibDir, "libloader.so")
+            val rootDir = getRootDir()
+            ensureDnsAndSsl(rootDir)
+
+            val resolvConf = File(rootDir, "etc/resolv.conf")
+            val sslDir = File(rootDir, "etc/ssl")
+            val certFile = File(sslDir, "certs/ca-certificates.crt")
+
+            val fullCommand = mutableListOf<String>()
+            if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
+                val cmdStr = session.command.joinToString(" ")
+                fullCommand.addAll(listOf(
+                    prootLib.absolutePath,
+                    "--link2symlink",
+                    "-0",
+                    "-r", rootDir.absolutePath,
+                    "-b", "/dev",
+                    "-b", "/proc",
+                    "-b", "/sys",
+                    "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
+                    "-b", "${sslDir.absolutePath}:/etc/ssl",
+                    "-b", "${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt",
+                    "-b", "${session.workingDir.absolutePath}:/workspace",
+                    "-w", "/workspace",
+                    "/bin/sh",
+                    "-c",
+                    "export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin; export HOME=/root; $cmdStr"
+                ))
+            } else {
+                fullCommand.addAll(session.command)
+            }
+
+            val processBuilder = ProcessBuilder(fullCommand)
                 .directory(session.workingDir)
 
             val procEnv = processBuilder.environment()
             session.env.forEach { (k, v) -> procEnv[k] = v }
-
-            // Ensure standard paths
-            val currentPath = procEnv["PATH"] ?: ""
-            val internalBin = "${reactContext.filesDir.absolutePath}/bin"
-            procEnv["PATH"] = "$internalBin:$currentPath:/system/bin:/system/xbin"
+            procEnv["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
+            if (loaderLib.exists()) {
+                procEnv["PROOT_LOADER"] = loaderLib.absolutePath
+            }
+            procEnv["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
             procEnv["HOME"] = reactContext.filesDir.absolutePath
             procEnv["TMPDIR"] = reactContext.cacheDir.absolutePath
 
@@ -190,7 +254,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun writeStdin(sessionId: String, input: String, promise: Promise) {
-        val session = sessions[sessionId]
+        val session = activeSessions[sessionId]
         if (session == null) {
             promise.reject("NOT_FOUND", "Session $sessionId not found.")
             return
@@ -206,7 +270,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun terminateSession(sessionId: String, force: Boolean, promise: Promise) {
-        val session = sessions[sessionId]
+        val session = activeSessions[sessionId]
         if (session == null) {
             promise.reject("NOT_FOUND", "Session $sessionId not found.")
             return
@@ -224,7 +288,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
     @ReactMethod
     fun listSessions(promise: Promise) {
         val array = Arguments.createArray()
-        sessions.values.forEach { session ->
+        activeSessions.values.forEach { session ->
             val map = Arguments.createMap().apply {
                 putString("sessionId", session.sessionId)
                 putString("sessionType", session.sessionType.name)
@@ -239,7 +303,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun getSessionStatus(sessionId: String, promise: Promise) {
-        val session = sessions[sessionId]
+        val session = activeSessions[sessionId]
         if (session == null) {
             promise.reject("NOT_FOUND", "Session $sessionId not found.")
             return
@@ -255,11 +319,6 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         promise.resolve(map)
     }
 
-    companion object {
-        val embeddedServers = ConcurrentHashMap<String, EmbeddedProjectServer>()
-        fun getServer(projectId: String): EmbeddedProjectServer? = embeddedServers[projectId]
-    }
-
     @ReactMethod
     fun startProjectServer(
         projectId: String,
@@ -268,34 +327,8 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         port: Int,
         promise: Promise
     ) {
-        try {
-            embeddedServers[projectId]?.stop()
-            val projDir = File(File(reactContext.filesDir, "projects"), projectId)
-            if (!projDir.exists()) projDir.mkdirs()
-
-            val server = EmbeddedProjectServer(
-                projectId = projectId,
-                projectName = projectName,
-                stackId = stackId,
-                port = port,
-                projectDir = projDir,
-                onLog = { text, channel ->
-                    val params = Arguments.createMap().apply {
-                        putString("sessionId", "srv-$projectId")
-                        putString("channel", channel)
-                        putString("text", text)
-                        putDouble("timestamp", System.currentTimeMillis().toDouble())
-                        putString("projectId", projectId)
-                    }
-                    sendEvent("onProcessOutput", params)
-                }
-            )
-            server.start()
-            embeddedServers[projectId] = server
-            promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("SERVER_START_ERROR", e.message, e)
-        }
+        // Obsolete stub - real runtime handles ports directly
+        promise.resolve(true)
     }
 
     @ReactMethod
@@ -314,7 +347,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         moduleScope.cancel()
         embeddedServers.values.forEach { it.stop() }
         embeddedServers.clear()
-        sessions.values.forEach { it.terminate(force = true) }
-        sessions.clear()
+        activeSessions.values.forEach { it.terminate(force = true) }
+        activeSessions.clear()
     }
 }
