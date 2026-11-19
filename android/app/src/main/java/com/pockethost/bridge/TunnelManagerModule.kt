@@ -85,6 +85,28 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 val sslDir = File(rootDir, "etc/ssl")
                 val certFile = File(sslDir, "certs/ca-certificates.crt")
 
+                // Ensure resolv.conf exists for container DNS resolution
+                if (!resolvConf.exists()) {
+                    try {
+                        resolvConf.parentFile?.mkdirs()
+                        resolvConf.writeText("nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n")
+                    } catch (_: Exception) {}
+                }
+
+                // Ensure CA certificate bundle exists in rootfs
+                if (!certFile.exists() || certFile.length() == 0L) {
+                    try {
+                        certFile.parentFile?.mkdirs()
+                        reactContext.assets.open("ca-certificates.crt").use { input ->
+                            val bytes = input.readBytes()
+                            certFile.writeBytes(bytes)
+                            File(sslDir, "cert.pem").writeBytes(bytes)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("TunnelManager", "Could not copy ca-certificates from assets", e)
+                    }
+                }
+
                 // Run cloudflared inside PRoot Alpine container so Go runtime
                 // has full access to /etc/resolv.conf (DNS) and /etc/ssl/certs.
                 val command = mutableListOf<String>()
@@ -101,7 +123,6 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                         "-b", "/sys",
                         "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
                         "-b", "${sslDir.absolutePath}:/etc/ssl",
-                        "-b", "${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt",
                         "-b", "${nativeLibDir.absolutePath}:${nativeLibDir.absolutePath}",
                         "-w", "/root",
                         cfLib.absolutePath,
@@ -132,7 +153,12 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 procEnv["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
                 procEnv["HOME"] = "/root"
                 procEnv["TMPDIR"] = reactContext.cacheDir.absolutePath
-                if (certFile.exists()) {
+                val inPRoot = prootLib.exists() && rootDir.exists() && resolvConf.exists()
+                if (inPRoot) {
+                    procEnv["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt"
+                    procEnv["SSL_CERT_DIR"] = "/etc/ssl/certs"
+                    procEnv["CURL_CA_BUNDLE"] = "/etc/ssl/certs/ca-certificates.crt"
+                } else if (certFile.exists()) {
                     procEnv["SSL_CERT_FILE"] = certFile.absolutePath
                     procEnv["SSL_CERT_DIR"] = sslDir.absolutePath
                 }

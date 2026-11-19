@@ -204,7 +204,7 @@ export const TerminalLogScreen: React.FC = () => {
       {/* 4. Quick Execution Command Chips */}
       <View style={styles.quickCommandsBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.quickCommandsContent}>
-          {['node -v', 'npm -v', 'python3 --version', 'ls -la', 'cat package.json', 'apk info'].map((cmd) => (
+          {['node -v', 'npm -v', 'python3 --version', 'ls -la', 'cat package.json', 'curl http://localhost:3000', 'ls /etc/ssl/certs', 'apk info'].map((cmd) => (
             <TouchableOpacity
               key={cmd}
               style={styles.quickCmdChip}
