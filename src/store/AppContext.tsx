@@ -372,22 +372,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (isNodeBased) {
         addLog(`==> Checking Node.js runtime...`, 'system', 'build', id, project.name);
-        const nodeCheck = await NativePRootBootstrap.executeShellCommand('node -v', projectWorkspace);
+        let nodeCheck = await NativePRootBootstrap.executeShellCommand('node -v', projectWorkspace);
         if (nodeCheck.exitCode !== 0 || !nodeCheck.stdout.trim().startsWith('v')) {
-          addLog(`[Build Error] Node.js is not installed on this device.`, 'stderr', 'build', id, project.name);
-          addLog(`[Build Error] Please open "Packages & Storage" tab and tap "Install" next to Node.js & npm.`, 'stderr', 'build', id, project.name);
-          updateProject(id, { status: 'FAILED' });
-          return;
+          addLog(`==> Node.js not detected in Linux container. Provisioning Node.js & npm...`, 'system', 'build', id, project.name);
+          try {
+            await installSoftware('nodejs');
+            nodeCheck = await NativePRootBootstrap.executeShellCommand('node -v', projectWorkspace);
+          } catch (instErr: any) {
+            addLog(`[Build Error] Failed to auto-provision Node.js: ${instErr.message}`, 'stderr', 'build', id, project.name);
+          }
+          if (nodeCheck.exitCode !== 0 || !nodeCheck.stdout.trim().startsWith('v')) {
+            addLog(`[Build Error] Node.js is not installed on this device.`, 'stderr', 'build', id, project.name);
+            addLog(`[Build Error] Please open "Packages & Storage" tab and tap "Install" next to Node.js & npm.`, 'stderr', 'build', id, project.name);
+            updateProject(id, { status: 'FAILED' });
+            return;
+          }
         }
         addLog(`==> Using Node.js ${nodeCheck.stdout.trim()}`, 'system', 'build', id, project.name);
       } else if (isPythonBased) {
         addLog(`==> Checking Python 3 runtime...`, 'system', 'build', id, project.name);
-        const pyCheck = await NativePRootBootstrap.executeShellCommand('python3 --version', projectWorkspace);
+        let pyCheck = await NativePRootBootstrap.executeShellCommand('python3 --version', projectWorkspace);
         if (pyCheck.exitCode !== 0) {
-          addLog(`[Build Error] Python 3 is not installed on this device.`, 'stderr', 'build', id, project.name);
-          addLog(`[Build Error] Please open "Packages & Storage" tab and tap "Install" next to Python 3.`, 'stderr', 'build', id, project.name);
-          updateProject(id, { status: 'FAILED' });
-          return;
+          addLog(`==> Python 3 not detected in Linux container. Provisioning Python 3 & pip...`, 'system', 'build', id, project.name);
+          try {
+            await installSoftware('python');
+            pyCheck = await NativePRootBootstrap.executeShellCommand('python3 --version', projectWorkspace);
+          } catch (instErr: any) {
+            addLog(`[Build Error] Failed to auto-provision Python: ${instErr.message}`, 'stderr', 'build', id, project.name);
+          }
+          if (pyCheck.exitCode !== 0) {
+            addLog(`[Build Error] Python 3 is not installed on this device.`, 'stderr', 'build', id, project.name);
+            addLog(`[Build Error] Please open "Packages & Storage" tab and tap "Install" next to Python 3.`, 'stderr', 'build', id, project.name);
+            updateProject(id, { status: 'FAILED' });
+            return;
+          }
         }
         addLog(`==> Using ${pyCheck.stdout.trim()}`, 'system', 'build', id, project.name);
       }

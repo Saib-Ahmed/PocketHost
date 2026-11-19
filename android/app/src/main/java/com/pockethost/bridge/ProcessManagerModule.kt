@@ -33,6 +33,12 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
+    private fun isAlpineRootfsExtracted(rootDir: File): Boolean {
+        val busybox = File(rootDir, "bin/busybox")
+        val etc = File(rootDir, "etc")
+        return (busybox.exists() || File(rootDir, "bin/sh").exists()) && etc.isDirectory
+    }
+
     private fun getRootDir(): File = File(reactContext.filesDir, "rootfs")
 
     private fun ensureDnsAndSsl(rootDir: File) {
@@ -143,7 +149,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
 
                 val fullCommand = mutableListOf<String>()
 
-                if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
+                if (prootLib.exists() && isAlpineRootfsExtracted(rootDir)) {
                     // Build the shell command string from the session command parts
                     val cmdStr = session.command.joinToString(" ")
 

@@ -70,11 +70,16 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         sendEvent("onPackageInstallProgress", params)
     }
 
+    private fun isAlpineRootfsExtracted(rootDir: File): Boolean {
+        val busybox = File(rootDir, "bin/busybox")
+        val etc = File(rootDir, "etc")
+        return (busybox.exists() || File(rootDir, "bin/sh").exists()) && etc.isDirectory
+    }
+
     private fun ensureEnvironment() {
         val rootDir = getRootDir()
-        val shFile = File(rootDir, "bin/sh")
 
-        if (!shFile.exists()) {
+        if (!isAlpineRootfsExtracted(rootDir)) {
             rootDir.mkdirs()
             getBinDir().mkdirs()
             getProjectsDir().mkdirs()
@@ -82,9 +87,9 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
             try {
                 val assetList = reactContext.assets.list("")?.toList() ?: emptyList()
                 val assetName = when {
-                    assetList.contains("alpine-rootfs.tar") -> "alpine-rootfs.tar"
                     assetList.contains("alpine-rootfs.tar.gz") -> "alpine-rootfs.tar.gz"
-                    else -> "alpine-rootfs.tar"
+                    assetList.contains("alpine-rootfs.tar") -> "alpine-rootfs.tar"
+                    else -> "alpine-rootfs.tar.gz"
                 }
 
                 val tempTar = File(reactContext.cacheDir, "alpine-rootfs.archive")
@@ -114,6 +119,17 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
             } catch (e: Exception) {
                 android.util.Log.e("PocketHost", "Failed to extract alpine rootfs", e)
             }
+        }
+
+        // Ensure bin/sh is directly executable: if it is a broken host symlink, copy busybox to bin/sh
+        val busyboxBin = File(rootDir, "bin/busybox")
+        val shBin = File(rootDir, "bin/sh")
+        if (busyboxBin.exists() && (!shBin.exists() || !shBin.isFile)) {
+            try {
+                shBin.delete()
+                busyboxBin.copyTo(shBin, overwrite = true)
+                shBin.setExecutable(true, false)
+            } catch (_: Exception) {}
         }
 
         // Configure DNS
@@ -158,7 +174,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         val certFile = File(sslDir, "certs/ca-certificates.crt")
 
         val cmdList = mutableListOf<String>()
-        if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
+        if (prootLib.exists() && isAlpineRootfsExtracted(rootDir)) {
             prootLib.setExecutable(true, false)
             cmdList.addAll(listOf(
                 prootLib.absolutePath,
@@ -676,7 +692,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         try {
             ensureEnvironment()
             val rootDir = getRootDir()
-            val hasRootFs = rootDir.exists() && File(rootDir, "bin/sh").exists()
+            val hasRootFs = isAlpineRootfsExtracted(rootDir)
             val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
             val prootLib = File(nativeLibDir, "libproot.so")
             val isReady = hasRootFs && prootLib.exists()
@@ -749,7 +765,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
 
             val cmdList = Arguments.createArray()
 
-            if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
+            if (prootLib.exists() && isAlpineRootfsExtracted(rootDir)) {
                 cmdList.pushString(prootLib.absolutePath)
                 cmdList.pushString("--kill-on-exit")
                 cmdList.pushString("--link2symlink")
