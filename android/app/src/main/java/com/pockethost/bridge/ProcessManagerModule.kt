@@ -23,8 +23,6 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
     companion object {
         val activeSessions = ConcurrentHashMap<String, ProcessSession>()
         fun getSession(sessionId: String): ProcessSession? = activeSessions[sessionId]
-        val embeddedServers = ConcurrentHashMap<String, EmbeddedProjectServer>()
-        fun getServer(projectId: String): EmbeddedProjectServer? = embeddedServers[projectId]
     }
 
     private fun sendEvent(eventName: String, params: WritableMap) {
@@ -130,88 +128,107 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
             return
         }
 
-        try {
-            val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
-            val prootLib = File(nativeLibDir, "libproot.so")
-            val loaderLib = File(nativeLibDir, "libloader.so")
-            val rootDir = getRootDir()
-            ensureDnsAndSsl(rootDir)
+        moduleScope.launch {
+            try {
+                val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
+                val prootLib = File(nativeLibDir, "libproot.so")
+                val loaderLib = File(nativeLibDir, "libloader.so")
+                val rootDir = getRootDir()
 
-            val resolvConf = File(rootDir, "etc/resolv.conf")
-            val sslDir = File(rootDir, "etc/ssl")
-            val certFile = File(sslDir, "certs/ca-certificates.crt")
+                ensureDnsAndSsl(rootDir)
 
-            val fullCommand = mutableListOf<String>()
-            if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
-                val cmdStr = session.command.joinToString(" ")
-                fullCommand.addAll(listOf(
-                    prootLib.absolutePath,
-                    "--link2symlink",
-                    "-0",
-                    "-r", rootDir.absolutePath,
-                    "-b", "/dev",
-                    "-b", "/proc",
-                    "-b", "/sys",
-                    "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
-                    "-b", "${sslDir.absolutePath}:/etc/ssl",
-                    "-b", "${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt",
-                    "-b", "${session.workingDir.absolutePath}:/workspace",
-                    "-w", "/workspace",
-                    "/bin/sh",
-                    "-c",
-                    "export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin; export HOME=/root; $cmdStr"
-                ))
-            } else {
-                fullCommand.addAll(session.command)
-            }
+                val resolvConf = File(rootDir, "etc/resolv.conf")
+                val sslDir = File(rootDir, "etc/ssl")
+                val certFile = File(sslDir, "certs/ca-certificates.crt")
 
-            val processBuilder = ProcessBuilder(fullCommand)
-                .directory(session.workingDir)
+                val fullCommand = mutableListOf<String>()
 
-            val procEnv = processBuilder.environment()
-            session.env.forEach { (k, v) -> procEnv[k] = v }
-            procEnv["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
-            if (loaderLib.exists()) {
-                procEnv["PROOT_LOADER"] = loaderLib.absolutePath
-            }
-            procEnv["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
-            procEnv["HOME"] = reactContext.filesDir.absolutePath
-            procEnv["TMPDIR"] = reactContext.cacheDir.absolutePath
+                if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
+                    // Build the shell command string from the session command parts
+                    val cmdStr = session.command.joinToString(" ")
 
-            val process = processBuilder.start()
-            session.process = process
-            session.setupStdin()
-            session.status = ProcessStatus.RUNNING
-
-            emitStatusChange(sessionId, ProcessStatus.RUNNING, null)
-
-            // Start stdout reader
-            session.stdoutJob = moduleScope.launch {
-                streamOutput(sessionId, process.inputStream, "stdout")
-            }
-
-            // Start stderr reader
-            session.stderrJob = moduleScope.launch {
-                streamOutput(sessionId, process.errorStream, "stderr")
-            }
-
-            // Monitor process completion in background
-            moduleScope.launch {
-                val exitCode = try {
-                    process.waitFor()
-                } catch (_: InterruptedException) {
-                    -1
+                    fullCommand.addAll(listOf(
+                        prootLib.absolutePath,
+                        "--kill-on-exit",
+                        "--link2symlink",
+                        "-0",
+                        "-r", rootDir.absolutePath,
+                        "-b", "/dev",
+                        "-b", "/proc",
+                        "-b", "/sys",
+                        "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
+                        "-b", "${sslDir.absolutePath}:/etc/ssl",
+                        "-b", "${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt",
+                        "-b", "${session.workingDir.absolutePath}:/workspace",
+                        "-b", "${nativeLibDir.absolutePath}:${nativeLibDir.absolutePath}",
+                        "-w", "/workspace",
+                        "/bin/sh",
+                        "-c",
+                        "export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin; export HOME=/root; export TERM=xterm; $cmdStr"
+                    ))
+                } else {
+                    // No PRoot — run command directly (fallback for non-Linux commands)
+                    fullCommand.addAll(session.command)
                 }
-                session.exitCode = exitCode
-                session.status = if (exitCode == 0) ProcessStatus.STOPPED else ProcessStatus.FAILED
-                emitStatusChange(sessionId, session.status, exitCode)
-            }
 
-            promise.resolve(true)
-        } catch (e: Exception) {
-            session.status = ProcessStatus.FAILED
-            emitStatusChange(sessionId, ProcessStatus.FAILED, -1)
-            promise.reject("START_ERROR", e.message, e)
+                val processBuilder = ProcessBuilder(fullCommand)
+                    .directory(session.workingDir)
+
+                val procEnv = processBuilder.environment()
+                session.env.forEach { (k, v) -> procEnv[k] = v }
+                procEnv["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
+                if (loaderLib.exists()) {
+                    procEnv["PROOT_LOADER"] = loaderLib.absolutePath
+                }
+                procEnv["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
+                procEnv["HOME"] = "/root"
+                procEnv["TMPDIR"] = reactContext.cacheDir.absolutePath
+                procEnv["TERM"] = "xterm"
+                procEnv["LANG"] = "en_US.UTF-8"
+
+                val process = processBuilder.start()
+                session.process = process
+                session.setupStdin()
+                session.status = ProcessStatus.RUNNING
+
+                withContext(Dispatchers.Main) {
+                    emitStatusChange(sessionId, ProcessStatus.RUNNING, null)
+                }
+
+                // Start stdout reader coroutine
+                session.stdoutJob = moduleScope.launch {
+                    streamOutput(sessionId, process.inputStream, "stdout")
+                }
+
+                // Start stderr reader coroutine
+                session.stderrJob = moduleScope.launch {
+                    streamOutput(sessionId, process.errorStream, "stderr")
+                }
+
+                // Monitor process completion in background
+                moduleScope.launch {
+                    val exitCode = try {
+                        process.waitFor()
+                    } catch (_: InterruptedException) {
+                        -1
+                    }
+                    session.exitCode = exitCode
+                    session.status = if (exitCode == 0) ProcessStatus.STOPPED else ProcessStatus.FAILED
+                    withContext(Dispatchers.Main) {
+                        emitStatusChange(sessionId, session.status, exitCode)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    promise.resolve(true)
+                }
+            } catch (e: Exception) {
+                session.status = ProcessStatus.FAILED
+                withContext(Dispatchers.Main) {
+                    emitStatusChange(sessionId, ProcessStatus.FAILED, -1)
+                    promise.reject("START_ERROR", e.message, e)
+                }
+            }
         }
     }
 
@@ -220,7 +237,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
             try {
                 val reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8))
                 val buffer = CharArray(2048)
-                var bytesRead = 0
+                var bytesRead: Int
 
                 while (isActive && reader.read(buffer).also { bytesRead = it } != -1) {
                     val text = String(buffer, 0, bytesRead)
@@ -270,14 +287,14 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun terminateSession(sessionId: String, force: Boolean, promise: Promise) {
-        val session = activeSessions[sessionId]
-        if (session == null) {
-            promise.reject("NOT_FOUND", "Session $sessionId not found.")
+        val session = activeSessions[sessionId] ?: run {
+            promise.resolve(false)
             return
         }
 
         try {
             session.terminate(force)
+            activeSessions.remove(sessionId)
             emitStatusChange(sessionId, ProcessStatus.STOPPED, session.exitCode ?: 0)
             promise.resolve(true)
         } catch (e: Exception) {
@@ -327,26 +344,18 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
         port: Int,
         promise: Promise
     ) {
-        // Obsolete stub - real runtime handles ports directly
+        // No-op: real runtime launched via startSession → PRoot
         promise.resolve(true)
     }
 
     @ReactMethod
     fun stopProjectServer(projectId: String, promise: Promise) {
-        try {
-            val server = embeddedServers.remove(projectId)
-            server?.stop()
-            promise.resolve(true)
-        } catch (e: Exception) {
-            promise.reject("SERVER_STOP_ERROR", e.message, e)
-        }
+        promise.resolve(true)
     }
 
     override fun invalidate() {
         super.invalidate()
         moduleScope.cancel()
-        embeddedServers.values.forEach { it.stop() }
-        embeddedServers.clear()
         activeSessions.values.forEach { it.terminate(force = true) }
         activeSessions.clear()
     }

@@ -15,6 +15,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.zip.GZIPInputStream
 import java.util.zip.ZipInputStream
+import java.util.concurrent.TimeUnit
 
 class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
@@ -94,11 +95,19 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                 val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
                 val busybox = File(nativeLibDir, "libbusybox.so")
                 if (busybox.exists()) {
+                    busybox.setExecutable(true, false)
                     val pb = ProcessBuilder(busybox.absolutePath, "tar", "-xf", tempTar.absolutePath, "-C", rootDir.absolutePath)
                     pb.redirectErrorStream(true)
                     val p = pb.start()
-                    p.waitFor()
+                    val output = p.inputStream.bufferedReader().readText()
+                    val code = p.waitFor()
+                    if (code != 0) {
+                        android.util.Log.e("PocketHost", "tar extraction failed (code $code): $output")
+                    } else {
+                        android.util.Log.i("PocketHost", "Alpine rootfs extracted successfully")
+                    }
                 } else {
+                    android.util.Log.w("PocketHost", "libbusybox.so not found, trying Java extractor")
                     extractTarGz(tempTar, rootDir)
                 }
                 tempTar.delete()
@@ -126,7 +135,16 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         } catch (_: Exception) {}
     }
 
-    private fun runCommandInPRootInternal(command: String, workspaceDir: File? = null): Triple<String, String, Int> {
+    /**
+     * Run a shell command inside PRoot Alpine Linux container.
+     * Reads stdout and stderr in parallel threads to avoid deadlock.
+     * Returns Triple(stdout, stderr, exitCode).
+     */
+    private fun runCommandInPRootInternal(
+        command: String,
+        workspaceDir: File? = null,
+        timeoutSeconds: Long = 120
+    ): Triple<String, String, Int> {
         ensureEnvironment()
         val nativeLibDir = File(reactContext.applicationInfo.nativeLibraryDir)
         val prootLib = File(nativeLibDir, "libproot.so")
@@ -137,11 +155,14 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
 
         val resolvConf = File(rootDir, "etc/resolv.conf")
         val sslDir = File(rootDir, "etc/ssl")
+        val certFile = File(sslDir, "certs/ca-certificates.crt")
 
         val cmdList = mutableListOf<String>()
         if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
+            prootLib.setExecutable(true, false)
             cmdList.addAll(listOf(
                 prootLib.absolutePath,
+                "--kill-on-exit",
                 "--link2symlink",
                 "-0",
                 "-r", rootDir.absolutePath,
@@ -150,32 +171,70 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                 "-b", "/sys",
                 "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
                 "-b", "${sslDir.absolutePath}:/etc/ssl",
+                "-b", "${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt",
                 "-b", "${workspace.absolutePath}:/workspace",
+                "-b", "${nativeLibDir.absolutePath}:${nativeLibDir.absolutePath}",
                 "-w", "/workspace",
                 "/bin/sh",
                 "-c",
-                "export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin; export HOME=/root; $command"
+                "export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin; export HOME=/root; export TERM=xterm; $command"
             ))
         } else {
+            // No PRoot — run on host shell (limited, only for simple commands)
+            android.util.Log.w("PocketHost", "PRoot or rootfs not found — running on host shell: $command")
             cmdList.addAll(listOf("/system/bin/sh", "-c", command))
         }
 
         val pb = ProcessBuilder(cmdList)
         pb.directory(workspace)
+        // Keep stdout/stderr separate so we can capture both
+        pb.redirectErrorStream(false)
+
         val env = pb.environment()
         env["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
         if (loaderLib.exists()) {
             env["PROOT_LOADER"] = loaderLib.absolutePath
         }
         env["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
-        env["HOME"] = reactContext.filesDir.absolutePath
+        env["HOME"] = "/root"
         env["TMPDIR"] = reactContext.cacheDir.absolutePath
+        env["TERM"] = "xterm"
+        env["LANG"] = "en_US.UTF-8"
 
         val proc = pb.start()
-        val stdout = proc.inputStream.bufferedReader().readText()
-        val stderr = proc.errorStream.bufferedReader().readText()
-        val exitCode = proc.waitFor()
-        return Triple(stdout, stderr, exitCode)
+
+        // Read stdout and stderr in parallel to prevent deadlock
+        val stdoutBuilder = StringBuilder()
+        val stderrBuilder = StringBuilder()
+
+        val stdoutThread = Thread {
+            try {
+                proc.inputStream.bufferedReader().forEachLine { line ->
+                    stdoutBuilder.append(line).append('\n')
+                }
+            } catch (_: Exception) {}
+        }
+        val stderrThread = Thread {
+            try {
+                proc.errorStream.bufferedReader().forEachLine { line ->
+                    stderrBuilder.append(line).append('\n')
+                }
+            } catch (_: Exception) {}
+        }
+
+        stdoutThread.start()
+        stderrThread.start()
+
+        val finished = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+        stdoutThread.join(2000)
+        stderrThread.join(2000)
+
+        if (!finished) {
+            proc.destroyForcibly()
+            return Triple(stdoutBuilder.toString(), stderrBuilder.toString() + "\n[TIMEOUT: command exceeded ${timeoutSeconds}s]", 124)
+        }
+
+        return Triple(stdoutBuilder.toString(), stderrBuilder.toString(), proc.exitValue())
     }
 
     @ReactMethod
@@ -183,7 +242,9 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         moduleScope.launch {
             try {
                 val ws = if (!workspacePath.isNullOrEmpty()) File(workspacePath) else null
-                val (stdout, stderr, exitCode) = runCommandInPRootInternal(command, ws)
+                android.util.Log.d("PocketHost", "executeShellCommand: $command (workspace: ${ws?.absolutePath ?: "default"})")
+                val (stdout, stderr, exitCode) = runCommandInPRootInternal(command, ws, 60)
+                android.util.Log.d("PocketHost", "executeShellCommand done (code=$exitCode): stdout=$stdout stderr=$stderr")
                 withContext(Dispatchers.Main) {
                     val map = Arguments.createMap().apply {
                         putString("stdout", stdout)
@@ -193,8 +254,9 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                     promise.resolve(map)
                 }
             } catch (e: Exception) {
+                android.util.Log.e("PocketHost", "executeShellCommand error", e)
                 withContext(Dispatchers.Main) {
-                    promise.reject("EXEC_ERROR", e.message, e)
+                    promise.reject("EXEC_ERROR", e.message ?: "Shell execution failed", e)
                 }
             }
         }
@@ -251,11 +313,10 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                         emitPackageProgress("cloudflared", "STARTING", 50, 20.0, 37.8, "Verifying cloudflared binary...")
                         val cfLib = File(nativeLibDir, "libcloudflared.so")
                         if (cfLib.exists()) {
-                            emitPackageProgress("cloudflared", "INSTALLED", 100, 37.8, 37.8, "Cloudflare Tunnel binary ready")
+                            cfLib.setExecutable(true, false)
+                            emitPackageProgress("cloudflared", "INSTALLED", 100, 37.8, 37.8, "Cloudflare Tunnel binary ready at ${cfLib.absolutePath}")
                         } else {
-                            val dest = File(getBinDir(), "cloudflared")
-                            val url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64"
-                            downloadFileWithProgress(url, dest, "cloudflared", "Cloudflare Tunnel CLI")
+                            throw RuntimeException("libcloudflared.so not found in native library dir. Please rebuild the APK.")
                         }
                         withContext(Dispatchers.Main) {
                             promise.resolve(Arguments.createMap().apply {
@@ -266,11 +327,28 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                     }
                     "nodejs" -> {
                         emitPackageProgress("nodejs", "STARTING", 10, 0.0, 75.0, "Updating Alpine package repositories...")
-                        val cmd = "export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk update && apk add --no-cache nodejs npm"
-                        val (out, err, code) = runCommandInPRootInternal(cmd)
+                        // First check if already installed
+                        if (File(rootDir, "usr/bin/node").exists()) {
+                            emitPackageProgress("nodejs", "INSTALLED", 100, 75.0, 75.0, "Node.js already installed")
+                            withContext(Dispatchers.Main) {
+                                promise.resolve(Arguments.createMap().apply {
+                                    putBoolean("success", true)
+                                    putString("packageId", "nodejs")
+                                })
+                            }
+                            return@launch
+                        }
+                        emitPackageProgress("nodejs", "DOWNLOADING", 30, 10.0, 75.0, "Installing Node.js via Alpine apk...")
+                        val (out, err, code) = runCommandInPRootInternal(
+                            "apk update && apk add --no-cache nodejs npm",
+                            null,
+                            300
+                        )
+                        android.util.Log.d("PocketHost", "nodejs install stdout: $out")
+                        android.util.Log.d("PocketHost", "nodejs install stderr: $err")
                         val success = code == 0 && File(rootDir, "usr/bin/node").exists()
                         if (success) {
-                            emitPackageProgress("nodejs", "INSTALLED", 100, 75.0, 75.0, "Node.js (v20) and npm successfully installed")
+                            emitPackageProgress("nodejs", "INSTALLED", 100, 75.0, 75.0, "Node.js and npm successfully installed")
                             withContext(Dispatchers.Main) {
                                 promise.resolve(Arguments.createMap().apply {
                                     putBoolean("success", true)
@@ -278,13 +356,28 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                                 })
                             }
                         } else {
-                            throw RuntimeException("Failed to install Node.js (code $code): $err\n$out")
+                            throw RuntimeException("Failed to install Node.js (exit code $code).\nstdout: $out\nstderr: $err")
                         }
                     }
                     "python" -> {
                         emitPackageProgress("python", "STARTING", 10, 0.0, 60.0, "Updating Alpine package repositories...")
-                        val cmd = "export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk update && apk add --no-cache python3 py3-pip"
-                        val (out, err, code) = runCommandInPRootInternal(cmd)
+                        if (File(rootDir, "usr/bin/python3").exists()) {
+                            emitPackageProgress("python", "INSTALLED", 100, 60.0, 60.0, "Python 3 already installed")
+                            withContext(Dispatchers.Main) {
+                                promise.resolve(Arguments.createMap().apply {
+                                    putBoolean("success", true)
+                                    putString("packageId", "python")
+                                })
+                            }
+                            return@launch
+                        }
+                        emitPackageProgress("python", "DOWNLOADING", 30, 10.0, 60.0, "Installing Python 3 via Alpine apk...")
+                        val (out, err, code) = runCommandInPRootInternal(
+                            "apk update && apk add --no-cache python3 py3-pip",
+                            null,
+                            300
+                        )
+                        android.util.Log.d("PocketHost", "python install stdout: $out stderr: $err")
                         val success = code == 0 && File(rootDir, "usr/bin/python3").exists()
                         if (success) {
                             emitPackageProgress("python", "INSTALLED", 100, 60.0, 60.0, "Python 3 and pip successfully installed")
@@ -295,13 +388,16 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                                 })
                             }
                         } else {
-                            throw RuntimeException("Failed to install Python 3 (code $code): $err\n$out")
+                            throw RuntimeException("Failed to install Python 3 (exit code $code).\nstdout: $out\nstderr: $err")
                         }
                     }
                     "git" -> {
                         emitPackageProgress("git", "STARTING", 10, 0.0, 25.0, "Updating Alpine package repositories...")
-                        val cmd = "export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk update && apk add --no-cache git"
-                        val (out, err, code) = runCommandInPRootInternal(cmd)
+                        val (out, err, code) = runCommandInPRootInternal(
+                            "apk update && apk add --no-cache git",
+                            null,
+                            180
+                        )
                         val success = code == 0 && File(rootDir, "usr/bin/git").exists()
                         if (success) {
                             emitPackageProgress("git", "INSTALLED", 100, 25.0, 25.0, "Git successfully installed")
@@ -312,7 +408,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                                 })
                             }
                         } else {
-                            throw RuntimeException("Failed to install Git (code $code): $err\n$out")
+                            throw RuntimeException("Failed to install Git (exit code $code).\nstdout: $out\nstderr: $err")
                         }
                     }
                     else -> {
@@ -326,6 +422,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                     }
                 }
             } catch (e: Exception) {
+                android.util.Log.e("PocketHost", "installPackage error", e)
                 emitPackageProgress(packageId, "FAILED", 0, 0.0, 0.0, "Installation failed: ${e.message}")
                 withContext(Dispatchers.Main) {
                     promise.reject("INSTALL_ERROR", e.message, e)
@@ -482,39 +579,46 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun uninstallPackage(packageId: String, promise: Promise) {
-        try {
-            val pkgId = packageId.lowercase().trim()
-            val rootDir = getRootDir()
-            var freedMb = 0.0
+        moduleScope.launch {
+            try {
+                val pkgId = packageId.lowercase().trim()
+                val rootDir = getRootDir()
+                var freedMb = 0.0
 
-            if (pkgId == "nodejs") {
-                val nodeFile = File(rootDir, "usr/bin/node")
-                if (nodeFile.exists()) {
-                    runCommandInPRootInternal("export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk del nodejs npm")
-                    freedMb = 75.0
+                when (pkgId) {
+                    "nodejs" -> {
+                        if (File(rootDir, "usr/bin/node").exists()) {
+                            runCommandInPRootInternal("apk del nodejs npm 2>/dev/null; true")
+                            freedMb = 75.0
+                        }
+                    }
+                    "python" -> {
+                        if (File(rootDir, "usr/bin/python3").exists()) {
+                            runCommandInPRootInternal("apk del python3 py3-pip 2>/dev/null; true")
+                            freedMb = 60.0
+                        }
+                    }
+                    "git" -> {
+                        if (File(rootDir, "usr/bin/git").exists()) {
+                            runCommandInPRootInternal("apk del git 2>/dev/null; true")
+                            freedMb = 25.0
+                        }
+                    }
                 }
-            } else if (pkgId == "python") {
-                val pyFile = File(rootDir, "usr/bin/python3")
-                if (pyFile.exists()) {
-                    runCommandInPRootInternal("export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk del python3 py3-pip")
-                    freedMb = 60.0
+
+                val res = Arguments.createMap().apply {
+                    putBoolean("success", true)
+                    putString("packageId", pkgId)
+                    putDouble("freedMb", freedMb)
                 }
-            } else if (pkgId == "git") {
-                val gitFile = File(rootDir, "usr/bin/git")
-                if (gitFile.exists()) {
-                    runCommandInPRootInternal("export PATH=/bin:/sbin:/usr/bin:/usr/sbin; apk del git")
-                    freedMb = 25.0
+                withContext(Dispatchers.Main) {
+                    promise.resolve(res)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    promise.reject("UNINSTALL_ERROR", e.message, e)
                 }
             }
-
-            val res = Arguments.createMap().apply {
-                putBoolean("success", true)
-                putString("packageId", pkgId)
-                putDouble("freedMb", freedMb)
-            }
-            promise.resolve(res)
-        } catch (e: Exception) {
-            promise.reject("UNINSTALL_ERROR", e.message, e)
         }
     }
 
@@ -640,32 +744,29 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
             val workspace = workspacePath ?: File(getProjectsDir(), "default").absolutePath
             val resolvConf = File(rootDir, "etc/resolv.conf")
             val sslDir = File(rootDir, "etc/ssl")
+            val certFile = File(sslDir, "certs/ca-certificates.crt")
 
             val cmdList = Arguments.createArray()
 
             if (prootLib.exists() && rootDir.exists() && File(rootDir, "bin/sh").exists()) {
                 cmdList.pushString(prootLib.absolutePath)
+                cmdList.pushString("--kill-on-exit")
                 cmdList.pushString("--link2symlink")
                 cmdList.pushString("-0")
                 cmdList.pushString("-r")
                 cmdList.pushString(rootDir.absolutePath)
-                cmdList.pushString("-b")
-                cmdList.pushString("/dev")
-                cmdList.pushString("-b")
-                cmdList.pushString("/proc")
-                cmdList.pushString("-b")
-                cmdList.pushString("/sys")
-                cmdList.pushString("-b")
-                cmdList.pushString("${resolvConf.absolutePath}:/etc/resolv.conf")
-                cmdList.pushString("-b")
-                cmdList.pushString("${sslDir.absolutePath}:/etc/ssl")
-                cmdList.pushString("-b")
-                cmdList.pushString("$workspace:/workspace")
-                cmdList.pushString("-w")
-                cmdList.pushString("/workspace")
+                cmdList.pushString("-b"); cmdList.pushString("/dev")
+                cmdList.pushString("-b"); cmdList.pushString("/proc")
+                cmdList.pushString("-b"); cmdList.pushString("/sys")
+                cmdList.pushString("-b"); cmdList.pushString("${resolvConf.absolutePath}:/etc/resolv.conf")
+                cmdList.pushString("-b"); cmdList.pushString("${sslDir.absolutePath}:/etc/ssl")
+                cmdList.pushString("-b"); cmdList.pushString("${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt")
+                cmdList.pushString("-b"); cmdList.pushString("$workspace:/workspace")
+                cmdList.pushString("-b"); cmdList.pushString("${nativeLibDir.absolutePath}:${nativeLibDir.absolutePath}")
+                cmdList.pushString("-w"); cmdList.pushString("/workspace")
                 cmdList.pushString("/bin/sh")
                 cmdList.pushString("-c")
-                cmdList.pushString("export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin; export HOME=/root; $command")
+                cmdList.pushString("export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin; export HOME=/root; export TERM=xterm; $command")
             } else {
                 cmdList.pushString("/system/bin/sh")
                 cmdList.pushString("-c")
@@ -768,11 +869,11 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                     }
                 }
 
-                // Scan common prefix
+                // Scan common prefix (strip top-level directory wrapper if present)
                 var commonPrefix: String? = null
                 ZipInputStream(tempZip.inputStream().buffered()).use { zis ->
                     var entry = zis.nextEntry
-                    var topDirs = mutableSetOf<String>()
+                    val topDirs = mutableSetOf<String>()
                     while (entry != null) {
                         val path = entry.name
                         val parts = path.split("/")
