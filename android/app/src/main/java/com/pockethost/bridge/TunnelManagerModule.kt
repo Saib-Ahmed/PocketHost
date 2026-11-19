@@ -111,7 +111,7 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 val readerJob = moduleScope.launch {
                     try {
                         val reader = BufferedReader(InputStreamReader(process.errorStream, StandardCharsets.UTF_8))
-                        var line: String?
+                        var line: String? = null
                         while (isActive && reader.readLine().also { line = it } != null) {
                             val currentLine = line ?: continue
                             android.util.Log.d("CloudflareTunnel", currentLine)
@@ -134,7 +134,7 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 val stdoutJob = moduleScope.launch {
                     try {
                         val reader = BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8))
-                        var line: String?
+                        var line: String? = null
                         while (isActive && reader.readLine().also { line = it } != null) {
                             val currentLine = line ?: continue
                             android.util.Log.d("CloudflareTunnel/stdout", currentLine)

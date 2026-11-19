@@ -438,7 +438,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         packageName: String
     ) = withContext(Dispatchers.IO) {
         var currentUrl = urlStr
-        var conn: HttpURLConnection
+        var conn: HttpURLConnection? = null
         var redirectCount = 0
 
         while (true) {
@@ -466,7 +466,8 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
             break
         }
 
-        val totalLength = conn.contentLengthLong
+        val activeConn = conn ?: throw java.io.IOException("Failed to establish connection to $urlStr")
+        val totalLength = activeConn.contentLengthLong
         val totalMb = if (totalLength > 0) (totalLength.toDouble() / (1024.0 * 1024.0)) else 0.0
 
         val tempFile = File(destFile.parentFile, "${destFile.name}.part")
@@ -475,10 +476,10 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
         var downloadedBytes = 0L
         var lastEmitTime = 0L
 
-        conn.inputStream.use { input ->
+        activeConn.inputStream.use { input ->
             FileOutputStream(tempFile).use { output ->
                 val buffer = ByteArray(16384)
-                var bytesRead: Int
+                var bytesRead = 0
                 while (input.read(buffer).also { bytesRead = it } != -1) {
                     output.write(buffer, 0, bytesRead)
                     downloadedBytes += bytesRead
@@ -902,7 +903,7 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                             val outFile = File(projDir, cleanName)
                             outFile.parentFile?.mkdirs()
                             FileOutputStream(outFile).use { out ->
-                                var len: Int
+                                var len = 0
                                 while (zis.read(buffer).also { len = it } > 0) {
                                     out.write(buffer, 0, len)
                                 }

@@ -237,7 +237,7 @@ class ProcessManagerModule(private val reactContext: ReactApplicationContext) :
             try {
                 val reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8))
                 val buffer = CharArray(2048)
-                var bytesRead: Int
+                var bytesRead = 0
 
                 while (isActive && reader.read(buffer).also { bytesRead = it } != -1) {
                     val text = String(buffer, 0, bytesRead)
