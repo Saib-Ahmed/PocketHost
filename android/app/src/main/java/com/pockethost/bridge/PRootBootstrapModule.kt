@@ -149,6 +149,22 @@ class PRootBootstrapModule(private val reactContext: ReactApplicationContext) :
                 File(certsDir, "ca-certificates.crt").writeBytes(bytes)
             }
         } catch (_: Exception) {}
+
+        // Symlink or copy cloudflared to /usr/bin/cloudflared inside rootfs
+        val usrBin = File(rootDir, "usr/bin")
+        usrBin.mkdirs()
+        val cfLib = File(File(reactContext.applicationInfo.nativeLibraryDir), "libcloudflared.so")
+        val cfInRootfs = File(usrBin, "cloudflared")
+        if (cfLib.exists() && (!cfInRootfs.exists() || cfInRootfs.length() == 0L)) {
+            try {
+                java.nio.file.Files.createSymbolicLink(cfInRootfs.toPath(), cfLib.toPath())
+            } catch (_: Exception) {
+                try {
+                    cfLib.copyTo(cfInRootfs, overwrite = true)
+                    cfInRootfs.setExecutable(true, false)
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     /**

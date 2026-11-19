@@ -16,8 +16,8 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
     private val moduleScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val activeTunnels = ConcurrentHashMap<String, TunnelInstance>()
 
-    // Cloudflare Quick Tunnel URL pattern — appears on stderr
-    private val cloudflareUrlPattern = Pattern.compile("https://[a-zA-Z0-9-]+\\.trycloudflare\\.com")
+    // Cloudflare Quick Tunnel URL pattern — must not match api.trycloudflare.com
+    private val cloudflareUrlPattern = Pattern.compile("https://(?!api[.-])([a-zA-Z0-9-]+)\\.trycloudflare\\.com")
     private val zrokUrlPattern = Pattern.compile("https://[a-zA-Z0-9-]+\\.share\\.zrok\\.io")
 
     data class TunnelInstance(
@@ -78,27 +78,64 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 // Set executable permission
                 cfLib.setExecutable(true, false)
 
-                // Run cloudflared directly — it is a fully static ARM64 binary,
-                // no PRoot or dynamic linker needed.
-                // cloudflared tunnel --url http://localhost:PORT
-                // The public URL appears on stderr as:
-                //   "Your quick Tunnel has been created! Visit it at (it's freeee!): https://xyz.trycloudflare.com"
-                val command = listOf(
-                    cfLib.absolutePath,
-                    "tunnel",
-                    "--no-autoupdate",
-                    "--url", "http://localhost:$port"
-                )
+                val rootDir = File(reactContext.filesDir, "rootfs")
+                val prootLib = File(nativeLibDir, "libproot.so")
+                val loaderLib = File(nativeLibDir, "libloader.so")
+                val resolvConf = File(rootDir, "etc/resolv.conf")
+                val sslDir = File(rootDir, "etc/ssl")
+                val certFile = File(sslDir, "certs/ca-certificates.crt")
+
+                // Run cloudflared inside PRoot Alpine container so Go runtime
+                // has full access to /etc/resolv.conf (DNS) and /etc/ssl/certs.
+                val command = mutableListOf<String>()
+                if (prootLib.exists() && rootDir.exists() && resolvConf.exists()) {
+                    prootLib.setExecutable(true, false)
+                    command.addAll(listOf(
+                        prootLib.absolutePath,
+                        "--kill-on-exit",
+                        "--link2symlink",
+                        "-0",
+                        "-r", rootDir.absolutePath,
+                        "-b", "/dev",
+                        "-b", "/proc",
+                        "-b", "/sys",
+                        "-b", "${resolvConf.absolutePath}:/etc/resolv.conf",
+                        "-b", "${sslDir.absolutePath}:/etc/ssl",
+                        "-b", "${certFile.absolutePath}:/etc/ssl/certs/ca-certificates.crt",
+                        "-b", "${nativeLibDir.absolutePath}:${nativeLibDir.absolutePath}",
+                        "-w", "/root",
+                        cfLib.absolutePath,
+                        "tunnel",
+                        "--no-autoupdate",
+                        "--edge-ip-version", "4",
+                        "--url", "http://127.0.0.1:$port"
+                    ))
+                } else {
+                    command.addAll(listOf(
+                        cfLib.absolutePath,
+                        "tunnel",
+                        "--no-autoupdate",
+                        "--edge-ip-version", "4",
+                        "--url", "http://127.0.0.1:$port"
+                    ))
+                }
 
                 val processBuilder = ProcessBuilder(command)
                     .directory(reactContext.cacheDir)
                 processBuilder.redirectErrorStream(false) // keep stderr separate
 
                 val procEnv = processBuilder.environment()
-                procEnv["HOME"] = reactContext.filesDir.absolutePath
+                procEnv["LD_LIBRARY_PATH"] = nativeLibDir.absolutePath
+                if (loaderLib.exists()) {
+                    procEnv["PROOT_LOADER"] = loaderLib.absolutePath
+                }
+                procEnv["PROOT_TMP_DIR"] = reactContext.cacheDir.absolutePath
+                procEnv["HOME"] = "/root"
                 procEnv["TMPDIR"] = reactContext.cacheDir.absolutePath
-                procEnv["SSL_CERT_FILE"] = "${reactContext.filesDir}/rootfs/etc/ssl/cert.pem"
-                procEnv["SSL_CERT_DIR"] = "${reactContext.filesDir}/rootfs/etc/ssl/certs"
+                if (certFile.exists()) {
+                    procEnv["SSL_CERT_FILE"] = certFile.absolutePath
+                    procEnv["SSL_CERT_DIR"] = sslDir.absolutePath
+                }
 
                 val process = processBuilder.start()
 
@@ -106,6 +143,7 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                 activeTunnels[tunnelKey] = instance
 
                 val urlDeferred = CompletableDeferred<String>()
+                var lastErrorMessage = ""
 
                 // Cloudflare logs URL to stderr
                 val readerJob = moduleScope.launch {
@@ -115,16 +153,21 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                         while (isActive && reader.readLine().also { line = it } != null) {
                             val currentLine = line ?: continue
                             android.util.Log.d("CloudflareTunnel", currentLine)
+                            if (currentLine.contains("ERR ") || currentLine.contains("failed to request quick Tunnel")) {
+                                lastErrorMessage = currentLine
+                            }
                             val matcher = cloudflareUrlPattern.matcher(currentLine)
                             if (matcher.find()) {
                                 val url = matcher.group(0)!!
-                                instance.publicUrl = url
-                                instance.status = "CONNECTED"
-                                if (!urlDeferred.isCompleted) {
-                                    urlDeferred.complete(url)
+                                if (!url.contains("api.trycloudflare.com")) {
+                                    instance.publicUrl = url
+                                    instance.status = "CONNECTED"
+                                    if (!urlDeferred.isCompleted) {
+                                        urlDeferred.complete(url)
+                                    }
+                                    emitTunnelUrl(tunnelKey, url, port)
+                                    emitTunnelStatus(tunnelKey, "CONNECTED", url)
                                 }
-                                emitTunnelUrl(tunnelKey, url, port)
-                                emitTunnelStatus(tunnelKey, "CONNECTED", url)
                             }
                         }
                     } catch (_: Exception) {}
@@ -142,13 +185,15 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                             val matcher = cloudflareUrlPattern.matcher(currentLine)
                             if (matcher.find()) {
                                 val url = matcher.group(0)!!
-                                if (!urlDeferred.isCompleted) {
-                                    urlDeferred.complete(url)
+                                if (!url.contains("api.trycloudflare.com")) {
+                                    if (!urlDeferred.isCompleted) {
+                                        urlDeferred.complete(url)
+                                    }
+                                    instance.publicUrl = url
+                                    instance.status = "CONNECTED"
+                                    emitTunnelUrl(tunnelKey, url, port)
+                                    emitTunnelStatus(tunnelKey, "CONNECTED", url)
                                 }
-                                instance.publicUrl = url
-                                instance.status = "CONNECTED"
-                                emitTunnelUrl(tunnelKey, url, port)
-                                emitTunnelStatus(tunnelKey, "CONNECTED", url)
                             }
                         }
                     } catch (_: Exception) {}
@@ -180,7 +225,8 @@ class TunnelManagerModule(private val reactContext: ReactApplicationContext) :
                     // Try to read any process output for diagnostics
                     val procAlive = try { process.isAlive } catch (_: Exception) { false }
                     val exitCodeStr = if (!procAlive) "exit code: ${try { process.exitValue() } catch(_: Exception) { "?" }}" else "process still running"
-                    val errorMsg = "Cloudflare tunnel failed to establish public URL within 25 seconds. ($exitCodeStr). Check device internet connection and that port $port is accessible."
+                    val detail = if (lastErrorMessage.isNotEmpty()) "\nDetail: $lastErrorMessage" else ""
+                    val errorMsg = "Cloudflare tunnel failed to establish public URL within 25 seconds ($exitCodeStr).$detail"
                     android.util.Log.e("TunnelManager", errorMsg)
                     emitTunnelStatus(tunnelKey, "ERROR", null)
                     withContext(Dispatchers.Main) {

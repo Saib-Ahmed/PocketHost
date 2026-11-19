@@ -419,9 +419,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return;
       }
 
+      let detectedStartCommand = project.startCommand;
+
       if (isNodeBased) {
         const pkgCheck = await NativePRootBootstrap.executeShellCommand('[ -f package.json ] && echo "FOUND"', projectWorkspace);
         if (pkgCheck.stdout.trim() === 'FOUND') {
+          // Parse package.json for Next.js, Prisma, and build scripts
+          const catPkg = await NativePRootBootstrap.executeShellCommand('cat package.json', projectWorkspace);
+          let isNext = false;
+          let isPrisma = false;
+          let hasBuildScript = false;
+
+          try {
+            const pkgData = JSON.parse(catPkg.stdout.trim());
+            const allDeps = { ...(pkgData.dependencies || {}), ...(pkgData.devDependencies || {}) };
+            isNext = 'next' in allDeps;
+            isPrisma = 'prisma' in allDeps || '@prisma/client' in allDeps;
+            hasBuildScript = Boolean(pkgData.scripts?.build);
+          } catch (_: any) {}
+
+          // 2a. Install dependencies via npm
           const nmCheck = await NativePRootBootstrap.executeShellCommand('[ -d node_modules ] && echo "EXISTS"', projectWorkspace);
           if (nmCheck.stdout.trim() !== 'EXISTS') {
             addLog(`==> package.json detected. Installing dependencies via npm...`, 'system', 'build', id, project.name);
@@ -437,6 +454,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               updateProject(id, { status: 'FAILED' });
               return;
             }
+          }
+
+          // 2b. Prisma Client Generation if present
+          if (isPrisma) {
+            const prismaSchemaCheck = await NativePRootBootstrap.executeShellCommand('[ -f prisma/schema.prisma ] && echo "FOUND"', projectWorkspace);
+            if (prismaSchemaCheck.stdout.trim() === 'FOUND') {
+              addLog(`==> Prisma schema detected. Running 'npx prisma generate'...`, 'system', 'build', id, project.name);
+              const prismaRes = await NativePRootBootstrap.executeShellCommand('npx prisma generate', projectWorkspace);
+              if (prismaRes.stdout) prismaRes.stdout.split('\n').filter(Boolean).forEach((l) => addLog(l, 'stdout', 'build', id, project.name));
+              if (prismaRes.stderr) prismaRes.stderr.split('\n').filter(Boolean).forEach((l) => addLog(l, 'stderr', 'build', id, project.name));
+            }
+          }
+
+          // 2c. Next.js / Frontend Build Step
+          if (isNext) {
+            addLog(`==> Next.js project detected.`, 'system', 'build', id, project.name);
+            if (hasBuildScript) {
+              addLog(`==> Compiling Next.js: running 'npm run build'...`, 'system', 'build', id, project.name);
+              const buildRes = await NativePRootBootstrap.executeShellCommand('npm run build', projectWorkspace);
+              if (buildRes.stdout) buildRes.stdout.split('\n').filter(Boolean).forEach((l) => addLog(l, 'stdout', 'build', id, project.name));
+              if (buildRes.stderr) buildRes.stderr.split('\n').filter(Boolean).forEach((l) => addLog(l, 'stderr', 'build', id, project.name));
+              if (buildRes.exitCode !== 0) {
+                addLog(`[Build Failed] Next.js compilation failed with exit code ${buildRes.exitCode}. See errors above.`, 'stderr', 'build', id, project.name);
+                updateProject(id, { status: 'FAILED' });
+                return;
+              }
+            }
+            if (detectedStartCommand === 'node server.js' || !detectedStartCommand) {
+              detectedStartCommand = `npx next start -p ${project.port} -H 0.0.0.0`;
+            }
+          } else if (hasBuildScript && (project.stackId.includes('react') || project.stackId.includes('next'))) {
+            addLog(`==> Executing build script: 'npm run build'...`, 'system', 'build', id, project.name);
+            const buildRes = await NativePRootBootstrap.executeShellCommand('npm run build', projectWorkspace);
+            if (buildRes.stdout) buildRes.stdout.split('\n').filter(Boolean).forEach((l) => addLog(l, 'stdout', 'build', id, project.name));
+            if (buildRes.stderr) buildRes.stderr.split('\n').filter(Boolean).forEach((l) => addLog(l, 'stderr', 'build', id, project.name));
           }
         }
       } else if (isPythonBased) {
@@ -456,10 +508,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             return;
           }
         }
+
+        // FastAPI / Uvicorn auto-detection
+        const mainPyCheck = await NativePRootBootstrap.executeShellCommand('[ -f main.py ] && echo "MAIN" || ([ -f app.py ] && echo "APP")', projectWorkspace);
+        const pyEntry = mainPyCheck.stdout.trim() === 'MAIN' ? 'main' : (mainPyCheck.stdout.trim() === 'APP' ? 'app' : null);
+        if (pyEntry) {
+          const contentCheck = await NativePRootBootstrap.executeShellCommand(`grep -i "FastAPI" ${pyEntry}.py 2>/dev/null && echo "IS_FASTAPI"`, projectWorkspace);
+          if (contentCheck.stdout.includes('IS_FASTAPI')) {
+            addLog(`==> FastAPI ASGI service detected in ${pyEntry}.py`, 'system', 'build', id, project.name);
+            if (detectedStartCommand === 'python main.py' || !detectedStartCommand) {
+              detectedStartCommand = `python3 -m uvicorn ${pyEntry}:app --host 0.0.0.0 --port ${project.port}`;
+            }
+          }
+        }
       }
 
-      // Verify entry file exists
-      if (project.entryFile) {
+      // Verify entry file exists if specified
+      if (project.entryFile && !project.entryFile.includes('next')) {
         const entryCheck = await NativePRootBootstrap.executeShellCommand(`[ -f "${project.entryFile}" ] && echo "EXISTS"`, projectWorkspace);
         const hasPackageJson = (await NativePRootBootstrap.executeShellCommand('[ -f package.json ] && echo "YES"', projectWorkspace)).stdout.trim() === 'YES';
         if (entryCheck.stdout.trim() !== 'EXISTS' && !hasPackageJson) {
@@ -470,7 +535,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       // 3. Start Phase - Run Real Daemon inside PRoot
-      addLog(`==> Starting runtime service: ${project.startCommand}`, 'system', 'runtime', id, project.name);
+      addLog(`==> Starting runtime service: ${detectedStartCommand}`, 'system', 'runtime', id, project.name);
       await NativeNetworkInspector.startForegroundService(
         `PocketHost: ${project.name}`,
         `Port ${project.port} • ${project.publicUrlType.toUpperCase()}`
@@ -480,12 +545,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const envMap: Record<string, string> = {
         PORT: project.port.toString(),
         NODE_ENV: 'production',
+        HOST: '0.0.0.0',
       };
       project.envVars.forEach((v) => {
         if (v.key) envMap[v.key] = v.value;
       });
 
-      const commandParts = project.startCommand.split(/\s+/).filter(Boolean);
+      const commandParts = detectedStartCommand.split(/\s+/).filter(Boolean);
 
       await NativeProcessManager.createSession(
         sessionId,
@@ -504,7 +570,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addLog(`==> Establishing Cloudflare Quick Tunnel on port ${project.port}...`, 'system', 'tunnel', id, project.name);
         try {
           const cfRes = await NativeTunnelManager.startTunnel('cloudflare', project.port);
-          if (cfRes?.url && cfRes.url.includes('trycloudflare.com')) {
+          if (cfRes?.url && cfRes.url.includes('trycloudflare.com') && !cfRes.url.includes('api.trycloudflare.com')) {
             activeUrl = cfRes.url;
             addLog(`==> Cloudflare Tunnel Live: ${activeUrl}`, 'system', 'tunnel', id, project.name);
           } else {
@@ -645,25 +711,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const workspace = targetProj?.id ? `${envInfo.projectsDir}/${targetProj.id}` : envInfo.rootDir;
 
     addLog(`$ ${trimmed}`, 'stdout', 'terminal', targetProj?.id, targetProj?.name);
-
-    // If active session is running and input is interactive (not a new command):
-    if (
-      targetProj?.activeSessionId &&
-      targetProj.status === 'RUNNING' &&
-      !trimmed.startsWith('ls') &&
-      !trimmed.startsWith('node') &&
-      !trimmed.startsWith('npm') &&
-      !trimmed.startsWith('python') &&
-      !trimmed.startsWith('cat') &&
-      !trimmed.startsWith('apk') &&
-      !trimmed.startsWith('pwd') &&
-      !trimmed.startsWith('cloudflared')
-    ) {
-      try {
-        await NativeProcessManager.writeStdin(targetProj.activeSessionId, trimmed + '\n');
-        return;
-      } catch (_: any) {}
-    }
 
     try {
       const res = await NativePRootBootstrap.executeShellCommand(trimmed, workspace);

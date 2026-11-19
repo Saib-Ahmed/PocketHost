@@ -225,21 +225,41 @@ class NetworkInspectorModule(private val reactContext: ReactApplicationContext) 
                 try {
                     val pidMethod = session.process!!.javaClass.getMethod("pid")
                     val pid = pidMethod.invoke(session.process!!) as? Long
-                    if (pid != null) {
-                        val statmFile = File("/proc/$pid/statm")
-                        if (statmFile.exists()) {
-                            val parts = statmFile.readText().trim().split("\\s+".toRegex())
-                            if (parts.size >= 2) {
-                                val residentPages = parts[1].toLongOrNull() ?: 0L
-                                memoryMb = (residentPages * 4096.0) / (1024.0 * 1024.0)
+                    if (pid != null && pid > 0) {
+                        // 1. Real resident memory from /proc/$pid/status or statm
+                        val statusFile = File("/proc/$pid/status")
+                        if (statusFile.exists()) {
+                            statusFile.forEachLine { l ->
+                                if (l.startsWith("VmRSS:")) {
+                                    val kb = l.substringAfter("VmRSS:").trim().substringBefore(" ").toDoubleOrNull() ?: 0.0
+                                    memoryMb = kb / 1024.0
+                                }
+                            }
+                        }
+                        if (memoryMb <= 0.0) {
+                            val statmFile = File("/proc/$pid/statm")
+                            if (statmFile.exists()) {
+                                val parts = statmFile.readText().trim().split("\\s+".toRegex())
+                                if (parts.size >= 2) {
+                                    val residentPages = parts[1].toLongOrNull() ?: 0L
+                                    memoryMb = (residentPages * 4096.0) / (1024.0 * 1024.0)
+                                }
+                            }
+                        }
+
+                        // 2. Real CPU ticks from /proc/$pid/stat
+                        val statFile = File("/proc/$pid/stat")
+                        if (statFile.exists()) {
+                            val statParts = statFile.readText().trim().split("\\s+".toRegex())
+                            if (statParts.size >= 15) {
+                                val utime = statParts[13].toDoubleOrNull() ?: 0.0
+                                val stime = statParts[14].toDoubleOrNull() ?: 0.0
+                                val totalTicks = utime + stime
+                                cpuPercent = (totalTicks * 0.1).coerceIn(0.1, 99.0)
                             }
                         }
                     }
                 } catch (_: Exception) {}
-                if (memoryMb <= 0.0) {
-                    memoryMb = 34.2 + (sizeMb * 0.08).coerceAtMost(60.0)
-                }
-                cpuPercent = 1.8
             }
 
             val map = Arguments.createMap().apply {
